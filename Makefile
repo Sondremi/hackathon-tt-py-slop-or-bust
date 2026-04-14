@@ -3,7 +3,7 @@ include make/evaloriginal.mk
 include make/evalsolution.mk
 include make/evalexamplesolution.mk
 
-.PHONY: help spinup-and-test-all evaluate_all
+.PHONY: help spinup-and-test-all evaluate_all judge-ready
 help: ## Show this help message
 	@echo "Usage: make <target>"
 	@echo ""
@@ -23,6 +23,7 @@ help: ## Show this help message
 	@echo "  evaluate                              Evaluate a translated project (usage: make evaluate PROJECT=<path>)"
 	@echo "  scoring                               Run both successful-tests and pyscn code quality scoring, printing both results"
 	@echo "  scoring_codequality                   Run pyscn code quality scoring on translated code and tt (writes JSON result)"
+	@echo "  judge-ready                           Print a concise judging report from latest artifacts"
 	@echo ""
 	@echo "--- Translated project (ghostfolio_pytx) ---"
 	@echo "  translate-and-test-ghostfolio_pytx    Translate sources with tt, then run API tests against the output"
@@ -33,3 +34,6 @@ help: ## Show this help message
 	@echo ""
 	@echo "--- Reference example skeleton (ghostfolio_pytx_example) ---"
 	@echo "  spinup-and-test-ghostfolio_pytx_example  Spin up reference skeleton, run API tests, tear down (port 3334)"
+
+judge-ready: ## Print a concise report for the judge walkthrough
+	bash tools/judge_ready_report.sh
