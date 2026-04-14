@@ -30,11 +30,7 @@ class RoaiPortfolioCalculator(PortfolioCalculator):
         totalInvestmentWithCurrencyEffect = Big(0)
         totalTimeWeightedInvestment = Big(0)
         totalTimeWeightedInvestmentWithCurrencyEffect = Big(0)
-        for currentPosition in positions.filter(
-      ({ includeInTotalAssetValue }) => {
-        return includeInTotalAssetValue;
-      }
-    ):
+        for currentPosition in [currentPosition for currentPosition in positions if currentPosition.get("includeInTotalAssetValue")]:
             if currentPosition.feeInBaseCurrency:
                 totalFeesWithCurrencyEffect = totalFeesWithCurrencyEffect.plus(
           currentPosition.feeInBaseCurrency
@@ -86,9 +82,7 @@ class RoaiPortfolioCalculator(PortfolioCalculator):
       totalInterestWithCurrencyEffect,
       totalInvestment,
       totalInvestmentWithCurrencyEffect,
-      activitiesCount: self.activities.filter(({ type }) => {
-        return ['BUY', 'SELL'].includes(type);
-      }).length,
+      activitiesCount: self.activities.length,
       createdAt: datetime.now(),
       errors: [],
       historicalData: [],
@@ -141,9 +135,7 @@ class RoaiPortfolioCalculator(PortfolioCalculator):
         valueAtStartDate = None
         valueAtStartDateWithCurrencyEffect = None
         orders = clone_deep(
-      self.activities.filter(({ SymbolProfile }) => {
-        return SymbolProfile.symbol == symbol;
-      })
+      self.activities
     )
         isCash = orders[0].SymbolProfile.assetSubClass == 'CASH'
         if orders.length <= 0:
@@ -189,7 +181,7 @@ class RoaiPortfolioCalculator(PortfolioCalculator):
         latestActivity = orders[-1]
         if 
       dataSource == 'MANUAL' &&
-      ['BUY', 'SELL'].includes(latestActivity.type) &&
+      latestActivity.type in ['BUY', 'SELL'] &&
       latestActivity.unitPrice &&
       not unitPriceAtEndDate
     :
@@ -357,7 +349,7 @@ class RoaiPortfolioCalculator(PortfolioCalculator):
                 order.feeInBaseCurrencyWithCurrencyEffect = order.fee.mul(
           exchangeRateAtOrderDate or 1
         )
-            unitPrice = ['BUY', 'SELL'].includes(order.type)
+            unitPrice = order.type in ['BUY', 'SELL']
         ? order.unitPrice
         : order.unitPriceFromMarketData
             if unitPrice:
@@ -503,7 +495,7 @@ class RoaiPortfolioCalculator(PortfolioCalculator):
             if i > indexOfStartOrder:
                 if 
           valueOfInvestmentBeforeTransaction.gt(0) &&
-          ['BUY', 'SELL'].includes(order.type)
+          order.type in ['BUY', 'SELL']
         :
                     orderDate = Date(order.date)
                     previousOrderDate = Date(orders[i - 1].date)
@@ -630,8 +622,7 @@ class RoaiPortfolioCalculator(PortfolioCalculator):
       'wtd',
       'ytd',
       ...each_year_of_interval({ end, start })
-        .filter((date) => {
-          return not is_this_year(date);
+        ;
         })
         .map((date) => {
           return format_date(date, 'yyyy');
