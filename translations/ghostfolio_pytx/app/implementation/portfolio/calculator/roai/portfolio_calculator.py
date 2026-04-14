@@ -1,94 +1,761 @@
-"""Stub ROAI calculator — returns zero/empty values for all metrics.
-
-This is the example skeleton: it has the correct interface but no real
-calculation logic. Tests will fail on value assertions but all endpoints
-will run without errors. Replace this file with a real implementation.
-"""
+"""ROAI Portfolio Calculator — translated from TypeScript by tt."""
 from __future__ import annotations
 
+import sys
+from datetime import datetime, timedelta
+from typing import Any
+
 from app.wrapper.portfolio.calculator.portfolio_calculator import PortfolioCalculator
+from app.implementation.portfolio.calculator.helpers import (
+    Big, DATE_FORMAT, EPSILON, INVESTMENT_ACTIVITY_TYPES,
+    add_milliseconds, clone_deep, difference_in_days,
+    each_year_of_interval, end_of_day, end_of_year,
+    format_date, get_factor, get_interval_from_date_range,
+    is_after, is_before, is_this_year, is_within_interval,
+    min_date, parse_date, reset_hours, sort_by,
+    start_of_day, start_of_year, sub_days,
+)
 
 class RoaiPortfolioCalculator(PortfolioCalculator):
-    """Stub ROAI calculator — no real implementation."""
 
-    def get_performance(self) -> dict:
-        sorted_acts = self.sorted_activities()
-        symbols: set[str] = set()
-        for act in sorted_acts:
-            sym = act.get("symbol", "")
-            if sym and act.get("type", "") not in ("DIVIDEND", "FEE", "LIABILITY"):
-                symbols.add(sym)
-
-        first_date = min((a["date"] for a in sorted_acts), default=None)
+    def calculateOverallPerformance(self, positions):
+        currentValueInBaseCurrency = Big(0)
+        grossPerformance = Big(0)
+        grossPerformanceWithCurrencyEffect = Big(0)
+        hasErrors = False
+        netPerformance = Big(0)
+        totalFeesWithCurrencyEffect = Big(0)
+        totalInterestWithCurrencyEffect = Big(0)
+        totalInvestment = Big(0)
+        totalInvestmentWithCurrencyEffect = Big(0)
+        totalTimeWeightedInvestment = Big(0)
+        totalTimeWeightedInvestmentWithCurrencyEffect = Big(0)
+        for currentPosition in positions.filter(
+      ({ includeInTotalAssetValue }) => {
+        return includeInTotalAssetValue;
+      }
+    ):
+            if currentPosition.feeInBaseCurrency:
+                totalFeesWithCurrencyEffect = totalFeesWithCurrencyEffect.plus(
+          currentPosition.feeInBaseCurrency
+        )
+            if currentPosition.valueInBaseCurrency:
+                currentValueInBaseCurrency = currentValueInBaseCurrency.plus(
+          currentPosition.valueInBaseCurrency
+        )
+            else:
+                hasErrors = True
+            if currentPosition.investment:
+                totalInvestment = totalInvestment.plus(currentPosition.investment)
+                totalInvestmentWithCurrencyEffect =
+          totalInvestmentWithCurrencyEffect.plus(
+            currentPosition.investmentWithCurrencyEffect
+          )
+            else:
+                hasErrors = True
+            if currentPosition.grossPerformance:
+                grossPerformance = grossPerformance.plus(
+          currentPosition.grossPerformance
+        )
+                grossPerformanceWithCurrencyEffect =
+          grossPerformanceWithCurrencyEffect.plus(
+            currentPosition.grossPerformanceWithCurrencyEffect
+          )
+                netPerformance = netPerformance.plus(currentPosition.netPerformance)
+            elif not currentPosition.quantity.eq(0):
+                hasErrors = True
+            if currentPosition.timeWeightedInvestment:
+                totalTimeWeightedInvestment = totalTimeWeightedInvestment.plus(
+          currentPosition.timeWeightedInvestment
+        )
+                totalTimeWeightedInvestmentWithCurrencyEffect =
+          totalTimeWeightedInvestmentWithCurrencyEffect.plus(
+            currentPosition.timeWeightedInvestmentWithCurrencyEffect
+          )
+            elif not currentPosition.quantity.eq(0):
+                # Logger.warn(
+          `Missing historical market data for ${currentPosition.symbol} (${currentPosition.dataSource})`,
+          'PortfolioCalculator'
+        )
+                hasErrors = True
         return {
-            "chart": [],
-            "firstOrderDate": first_date,
-            "performance": {
-                "currentNetWorth": 0,
-                "currentValue": 0,
-                "currentValueInBaseCurrency": 0,
-                "netPerformance": 0,
-                "netPerformancePercentage": 0,
-                "netPerformancePercentageWithCurrencyEffect": 0,
-                "netPerformanceWithCurrencyEffect": 0,
-                "totalFees": 0,
-                "totalInvestment": 0,
-                "totalLiabilities": 0.0,
-                "totalValueables": 0.0,
-            },
-        }
+      currentValueInBaseCurrency,
+      hasErrors,
+      positions,
+      totalFeesWithCurrencyEffect,
+      totalInterestWithCurrencyEffect,
+      totalInvestment,
+      totalInvestmentWithCurrencyEffect,
+      activitiesCount: self.activities.filter(({ type }) => {
+        return ['BUY', 'SELL'].includes(type);
+      }).length,
+      createdAt: datetime.now(),
+      errors: [],
+      historicalData: [],
+      totalLiabilitiesWithCurrencyEffect(0)
+    }
 
-    def get_investments(self, group_by: str | None = None) -> dict:
-        return {"investments": []}
-
-    def get_holdings(self) -> dict:
-        return {"holdings": {}}
-
-    def get_details(self, base_currency: str = "USD") -> dict:
-        return {
-            "accounts": {
-                "default": {
-                    "balance": 0.0,
-                    "currency": base_currency,
-                    "name": "Default Account",
-                    "valueInBaseCurrency": 0.0,
-                }
-            },
-            "createdAt": min((a["date"] for a in self.activities), default=None),
-            "holdings": {},
-            "platforms": {
-                "default": {
-                    "balance": 0.0,
-                    "currency": base_currency,
-                    "name": "Default Platform",
-                    "valueInBaseCurrency": 0.0,
-                }
-            },
-            "summary": {
-                "totalInvestment": 0,
-                "netPerformance": 0,
-                "currentValueInBaseCurrency": 0,
-                "totalFees": 0,
-            },
-            "hasError": False,
-        }
-
-    def get_dividends(self, group_by: str | None = None) -> dict:
-        return {"dividends": []}
-
-    # --- Translated from TypeScript ---
     def getPerformanceCalculationType(self):
-        return "ROAI"
-    # --- End translated section ---
+        return PerformanceCalculationType.ROAI
 
-    def evaluate_report(self) -> dict:
+    def getSymbolMetrics(self, **kwargs):
+        currentExchangeRate = exchangeRates[format_date(datetime.now())]
+        currentValues = {}
+        currentValuesWithCurrencyEffect = {}
+        fees = Big(0)
+        feesAtStartDate = Big(0)
+        feesAtStartDateWithCurrencyEffect = Big(0)
+        feesWithCurrencyEffect = Big(0)
+        grossPerformance = Big(0)
+        grossPerformanceWithCurrencyEffect = Big(0)
+        grossPerformanceAtStartDate = Big(0)
+        grossPerformanceAtStartDateWithCurrencyEffect = Big(0)
+        grossPerformanceFromSells = Big(0)
+        grossPerformanceFromSellsWithCurrencyEffect = Big(0)
+        initialValue = None
+        initialValueWithCurrencyEffect = None
+        investmentAtStartDate = None
+        investmentAtStartDateWithCurrencyEffect = None
+        investmentValuesAccumulated = {}
+        investmentValuesAccumulatedWithCurrencyEffect = {}
+        investmentValuesWithCurrencyEffect = {}
+        lastAveragePrice = Big(0)
+        lastAveragePriceWithCurrencyEffect = Big(0)
+        netPerformanceValues = {}
+        netPerformanceValuesWithCurrencyEffect = {}
+        timeWeightedInvestmentValues = {}
+        timeWeightedInvestmentValuesWithCurrencyEffect = {}
+        totalAccountBalanceInBaseCurrency = Big(0)
+        totalDividend = Big(0)
+        totalDividendInBaseCurrency = Big(0)
+        totalInterest = Big(0)
+        totalInterestInBaseCurrency = Big(0)
+        totalInvestment = Big(0)
+        totalInvestmentFromBuyTransactions = Big(0)
+        totalInvestmentFromBuyTransactionsWithCurrencyEffect = Big(0)
+        totalInvestmentWithCurrencyEffect = Big(0)
+        totalLiabilities = Big(0)
+        totalLiabilitiesInBaseCurrency = Big(0)
+        totalQuantityFromBuyTransactions = Big(0)
+        totalUnits = Big(0)
+        valueAtStartDate = None
+        valueAtStartDateWithCurrencyEffect = None
+        orders = clone_deep(
+      self.activities.filter(({ SymbolProfile }) => {
+        return SymbolProfile.symbol == symbol;
+      })
+    )
+        isCash = orders[0].SymbolProfile.assetSubClass == 'CASH'
+        if orders.length <= 0:
+            return {
+        currentValues: {},
+        currentValuesWithCurrencyEffect: {},
+        feesWithCurrencyEffect(0),
+        grossPerformance(0),
+        grossPerformancePercentage(0),
+        grossPerformancePercentageWithCurrencyEffect(0),
+        grossPerformanceWithCurrencyEffect(0),
+        hasErrors: False,
+        initialValue(0),
+        initialValueWithCurrencyEffect(0),
+        investmentValuesAccumulated: {},
+        investmentValuesAccumulatedWithCurrencyEffect: {},
+        investmentValuesWithCurrencyEffect: {},
+        netPerformance(0),
+        netPerformancePercentage(0),
+        netPerformancePercentageWithCurrencyEffectMap: {},
+        netPerformanceValues: {},
+        netPerformanceValuesWithCurrencyEffect: {},
+        netPerformanceWithCurrencyEffectMap: {},
+        timeWeightedInvestment(0),
+        timeWeightedInvestmentValues: {},
+        timeWeightedInvestmentValuesWithCurrencyEffect: {},
+        timeWeightedInvestmentWithCurrencyEffect(0),
+        totalAccountBalanceInBaseCurrency(0),
+        totalDividend(0),
+        totalDividendInBaseCurrency(0),
+        totalInterest(0),
+        totalInterestInBaseCurrency(0),
+        totalInvestment(0),
+        totalInvestmentWithCurrencyEffect(0),
+        totalLiabilities(0),
+        totalLiabilitiesInBaseCurrency(0)
+      }
+        dateOfFirstTransaction = Date(orders[0].date)
+        endDateString = format_date(end)
+        startDateString = format_date(start)
+        unitPriceAtStartDate = marketSymbolMap[startDateString].[symbol]
+        unitPriceAtEndDate = marketSymbolMap[endDateString].[symbol]
+        latestActivity = orders[-1]
+        if 
+      dataSource == 'MANUAL' &&
+      ['BUY', 'SELL'].includes(latestActivity.type) &&
+      latestActivity.unitPrice &&
+      not unitPriceAtEndDate
+    :
+            unitPriceAtEndDate = latestActivity.unitPrice
+        elif isCash:
+            unitPriceAtEndDate = Big(1)
+        if 
+      not unitPriceAtEndDate ||
+      (not unitPriceAtStartDate and is_before(dateOfFirstTransaction, start))
+    :
+            return {
+        currentValues: {},
+        currentValuesWithCurrencyEffect: {},
+        feesWithCurrencyEffect(0),
+        grossPerformance(0),
+        grossPerformancePercentage(0),
+        grossPerformancePercentageWithCurrencyEffect(0),
+        grossPerformanceWithCurrencyEffect(0),
+        hasErrors: True,
+        initialValue(0),
+        initialValueWithCurrencyEffect(0),
+        investmentValuesAccumulated: {},
+        investmentValuesAccumulatedWithCurrencyEffect: {},
+        investmentValuesWithCurrencyEffect: {},
+        netPerformance(0),
+        netPerformancePercentage(0),
+        netPerformancePercentageWithCurrencyEffectMap: {},
+        netPerformanceWithCurrencyEffectMap: {},
+        netPerformanceValues: {},
+        netPerformanceValuesWithCurrencyEffect: {},
+        timeWeightedInvestment(0),
+        timeWeightedInvestmentValues: {},
+        timeWeightedInvestmentValuesWithCurrencyEffect: {},
+        timeWeightedInvestmentWithCurrencyEffect(0),
+        totalAccountBalanceInBaseCurrency(0),
+        totalDividend(0),
+        totalDividendInBaseCurrency(0),
+        totalInterest(0),
+        totalInterestInBaseCurrency(0),
+        totalInvestment(0),
+        totalInvestmentWithCurrencyEffect(0),
+        totalLiabilities(0),
+        totalLiabilitiesInBaseCurrency(0)
+      }
+        orders.append({
+      date: startDateString,
+      fee(0),
+      feeInBaseCurrency(0),
+      itemType: 'start',
+      quantity(0),
+      SymbolProfile: {
+        dataSource,
+        symbol,
+        assetSubClass: isCash ? 'CASH' : None
+      },
+      type: 'BUY',
+      unitPrice: unitPriceAtStartDate
+    })
+        orders.append({
+      date: endDateString,
+      fee(0),
+      feeInBaseCurrency(0),
+      itemType: 'end',
+      SymbolProfile: {
+        dataSource,
+        symbol,
+        assetSubClass: isCash ? 'CASH' : None
+      },
+      quantity(0),
+      type: 'BUY',
+      unitPrice: unitPriceAtEndDate
+    })
+        lastUnitPrice = None
+        ordersByDate = {}
+        for order in orders:
+            ordersByDate[order.date] = ordersByDate[order.date] or []
+            ordersByDate[order.date].append(order)
+        if not self.chartDates:
+            self.chartDates = Object.keys(chartDateMap).sort()
+        for dateString in self.chartDates:
+            if dateString < startDateString:
+                continue
+            elif dateString > endDateString:
+                break
+            if ordersByDate[dateString].length > 0:
+                for order in ordersByDate[dateString]:
+                    order.unitPriceFromMarketData =
+            marketSymbolMap[dateString].[symbol] or lastUnitPrice
+            else:
+                orders.append({
+          date: dateString,
+          fee(0),
+          feeInBaseCurrency(0),
+          quantity(0),
+          SymbolProfile: {
+            dataSource,
+            symbol,
+            assetSubClass: isCash ? 'CASH' : None
+          },
+          type: 'BUY',
+          unitPrice: marketSymbolMap[dateString].[symbol] or lastUnitPrice,
+          unitPriceFromMarketData:
+            marketSymbolMap[dateString].[symbol] or lastUnitPrice
+        })
+            latestActivity = orders[-1]
+            lastUnitPrice =
+        latestActivity.unitPriceFromMarketData or latestActivity.unitPrice
+        orders = sort_by(orders, ({ date, itemType }) => {
+      let sortIndex = parse_date(date);
+
+      if (itemType == 'end') {
+        sortIndex = add_milliseconds(sortIndex, 1);
+      } else if (itemType == 'start') {
+        sortIndex = add_milliseconds(sortIndex, -1);
+      }
+
+      return sortIndex.getTime();
+    })
+        indexOfStartOrder = orders.findIndex(({ itemType }) => {
+      return itemType == 'start';
+    })
+        indexOfEndOrder = orders.findIndex(({ itemType }) => {
+      return itemType == 'end';
+    })
+        totalInvestmentDays = 0
+        sumOfTimeWeightedInvestments = Big(0)
+        sumOfTimeWeightedInvestmentsWithCurrencyEffect = Big(0)
+        for i in range(orders.length):
+            order = orders[i]
+            if False:
+                # console.log()
+                # console.log()
+                # console.log(
+          i + 1,
+          order.date,
+          order.type,
+          order.itemType ? `(${order.itemType})` : ''
+        )
+            exchangeRateAtOrderDate = exchangeRates[order.date]
+            if order.type == 'DIVIDEND':
+                dividend = order.quantity.mul(order.unitPrice)
+                totalDividend = totalDividend.plus(dividend)
+                totalDividendInBaseCurrency = totalDividendInBaseCurrency.plus(
+          dividend.mul(exchangeRateAtOrderDate or 1)
+        )
+            elif order.type == 'INTEREST':
+                interest = order.quantity.mul(order.unitPrice)
+                totalInterest = totalInterest.plus(interest)
+                totalInterestInBaseCurrency = totalInterestInBaseCurrency.plus(
+          interest.mul(exchangeRateAtOrderDate or 1)
+        )
+            elif order.type == 'LIABILITY':
+                liabilities = order.quantity.mul(order.unitPrice)
+                totalLiabilities = totalLiabilities.plus(liabilities)
+                totalLiabilitiesInBaseCurrency = totalLiabilitiesInBaseCurrency.plus(
+          liabilities.mul(exchangeRateAtOrderDate or 1)
+        )
+            if order.itemType == 'start':
+                order.unitPrice =
+          indexOfStartOrder == 0
+            ? orders[i + 1].unitPrice
+            : unitPriceAtStartDate
+            if order.fee:
+                order.feeInBaseCurrency = order.fee.mul(currentExchangeRate or 1)
+                order.feeInBaseCurrencyWithCurrencyEffect = order.fee.mul(
+          exchangeRateAtOrderDate or 1
+        )
+            unitPrice = ['BUY', 'SELL'].includes(order.type)
+        ? order.unitPrice
+        : order.unitPriceFromMarketData
+            if unitPrice:
+                order.unitPriceInBaseCurrency = unitPrice.mul(currentExchangeRate or 1)
+                order.unitPriceInBaseCurrencyWithCurrencyEffect = unitPrice.mul(
+          exchangeRateAtOrderDate or 1
+        )
+            marketPriceInBaseCurrency = order.unitPriceFromMarketData.mul(currentExchangeRate or 1) ??
+        Big(0)
+            marketPriceInBaseCurrencyWithCurrencyEffect = order.unitPriceFromMarketData.mul(exchangeRateAtOrderDate or 1) ??
+        Big(0)
+            valueOfInvestmentBeforeTransaction = totalUnits.mul(
+        marketPriceInBaseCurrency
+      )
+            valueOfInvestmentBeforeTransactionWithCurrencyEffect = totalUnits.mul(marketPriceInBaseCurrencyWithCurrencyEffect)
+            if not investmentAtStartDate and i >= indexOfStartOrder:
+                investmentAtStartDate = totalInvestment or Big(0)
+                investmentAtStartDateWithCurrencyEffect =
+          totalInvestmentWithCurrencyEffect or Big(0)
+                valueAtStartDate = valueOfInvestmentBeforeTransaction
+                valueAtStartDateWithCurrencyEffect =
+          valueOfInvestmentBeforeTransactionWithCurrencyEffect
+            transactionInvestment = Big(0)
+            transactionInvestmentWithCurrencyEffect = Big(0)
+            if order.type == 'BUY':
+                transactionInvestment = order.quantity
+          .mul(order.unitPriceInBaseCurrency)
+          .mul(get_factor(order.type))
+                transactionInvestmentWithCurrencyEffect = order.quantity
+          .mul(order.unitPriceInBaseCurrencyWithCurrencyEffect)
+          .mul(get_factor(order.type))
+                totalQuantityFromBuyTransactions =
+          totalQuantityFromBuyTransactions.plus(order.quantity)
+                totalInvestmentFromBuyTransactions =
+          totalInvestmentFromBuyTransactions.plus(transactionInvestment)
+                totalInvestmentFromBuyTransactionsWithCurrencyEffect =
+          totalInvestmentFromBuyTransactionsWithCurrencyEffect.plus(
+            transactionInvestmentWithCurrencyEffect
+          )
+            elif order.type == 'SELL':
+                if totalUnits.gt(0):
+                    transactionInvestment = totalInvestment
+            .div(totalUnits)
+            .mul(order.quantity)
+            .mul(get_factor(order.type))
+                    transactionInvestmentWithCurrencyEffect =
+            totalInvestmentWithCurrencyEffect
+              .div(totalUnits)
+              .mul(order.quantity)
+              .mul(get_factor(order.type))
+            if False:
+                # console.log('order.quantity', order.quantity.toNumber())
+                # console.log('transactionInvestment', transactionInvestment.toNumber())
+                # console.log(
+          'transactionInvestmentWithCurrencyEffect',
+          transactionInvestmentWithCurrencyEffect.toNumber()
+        )
+            totalInvestmentBeforeTransaction = totalInvestment
+            totalInvestmentBeforeTransactionWithCurrencyEffect = totalInvestmentWithCurrencyEffect
+            totalInvestment = totalInvestment.plus(transactionInvestment)
+            totalInvestmentWithCurrencyEffect =
+        totalInvestmentWithCurrencyEffect.plus(
+          transactionInvestmentWithCurrencyEffect
+        )
+            if i >= indexOfStartOrder and not initialValue:
+                if 
+          i == indexOfStartOrder &&
+          not valueOfInvestmentBeforeTransaction.eq(0)
+        :
+                    initialValue = valueOfInvestmentBeforeTransaction
+                    initialValueWithCurrencyEffect =
+            valueOfInvestmentBeforeTransactionWithCurrencyEffect
+                elif transactionInvestment.gt(0):
+                    initialValue = transactionInvestment
+                    initialValueWithCurrencyEffect =
+            transactionInvestmentWithCurrencyEffect
+            fees = fees.plus(order.feeInBaseCurrency or 0)
+            feesWithCurrencyEffect = feesWithCurrencyEffect.plus(
+        order.feeInBaseCurrencyWithCurrencyEffect or 0
+      )
+            totalUnits = totalUnits.plus(order.quantity.mul(get_factor(order.type)))
+            valueOfInvestment = totalUnits.mul(marketPriceInBaseCurrency)
+            valueOfInvestmentWithCurrencyEffect = totalUnits.mul(
+        marketPriceInBaseCurrencyWithCurrencyEffect
+      )
+            grossPerformanceFromSell = order.type == 'SELL'
+          ? order.unitPriceInBaseCurrency
+              .minus(lastAveragePrice)
+              .mul(order.quantity)
+          (0)
+            grossPerformanceFromSellWithCurrencyEffect = order.type == 'SELL'
+          ? order.unitPriceInBaseCurrencyWithCurrencyEffect
+              .minus(lastAveragePriceWithCurrencyEffect)
+              .mul(order.quantity)
+          (0)
+            grossPerformanceFromSells = grossPerformanceFromSells.plus(
+        grossPerformanceFromSell
+      )
+            grossPerformanceFromSellsWithCurrencyEffect =
+        grossPerformanceFromSellsWithCurrencyEffect.plus(
+          grossPerformanceFromSellWithCurrencyEffect
+        )
+            lastAveragePrice = totalQuantityFromBuyTransactions.eq(0)
+        ? Big(0)
+        : totalInvestmentFromBuyTransactions.div(
+            totalQuantityFromBuyTransactions
+          )
+            lastAveragePriceWithCurrencyEffect = totalQuantityFromBuyTransactions.eq(
+        0
+      )
+        ? Big(0)
+        : totalInvestmentFromBuyTransactionsWithCurrencyEffect.div(
+            totalQuantityFromBuyTransactions
+          )
+            if totalUnits.eq(0):
+                totalInvestmentFromBuyTransactions = Big(0)
+                totalInvestmentFromBuyTransactionsWithCurrencyEffect = Big(0)
+                totalQuantityFromBuyTransactions = Big(0)
+            if False:
+                # console.log(
+          'grossPerformanceFromSells',
+          grossPerformanceFromSells.toNumber()
+        )
+                # console.log(
+          'grossPerformanceFromSellWithCurrencyEffect',
+          grossPerformanceFromSellWithCurrencyEffect.toNumber()
+        )
+            newGrossPerformance = valueOfInvestment
+        .minus(totalInvestment)
+        .plus(grossPerformanceFromSells)
+            newGrossPerformanceWithCurrencyEffect = valueOfInvestmentWithCurrencyEffect
+          .minus(totalInvestmentWithCurrencyEffect)
+          .plus(grossPerformanceFromSellsWithCurrencyEffect)
+            grossPerformance = newGrossPerformance
+            grossPerformanceWithCurrencyEffect =
+        newGrossPerformanceWithCurrencyEffect
+            if order.itemType == 'start':
+                feesAtStartDate = fees
+                feesAtStartDateWithCurrencyEffect = feesWithCurrencyEffect
+                grossPerformanceAtStartDate = grossPerformance
+                grossPerformanceAtStartDateWithCurrencyEffect =
+          grossPerformanceWithCurrencyEffect
+            if i > indexOfStartOrder:
+                if 
+          valueOfInvestmentBeforeTransaction.gt(0) &&
+          ['BUY', 'SELL'].includes(order.type)
+        :
+                    orderDate = Date(order.date)
+                    previousOrderDate = Date(orders[i - 1].date)
+                    daysSinceLastOrder = difference_in_days(
+            orderDate,
+            previousOrderDate
+          )
+                    if daysSinceLastOrder <= 0:
+                        daysSinceLastOrder = EPSILON
+                    totalInvestmentDays += daysSinceLastOrder
+                    sumOfTimeWeightedInvestments = sumOfTimeWeightedInvestments.add(
+            valueAtStartDate
+              .minus(investmentAtStartDate)
+              .plus(totalInvestmentBeforeTransaction)
+              .mul(daysSinceLastOrder)
+          )
+                    sumOfTimeWeightedInvestmentsWithCurrencyEffect =
+            sumOfTimeWeightedInvestmentsWithCurrencyEffect.add(
+              valueAtStartDateWithCurrencyEffect
+                .minus(investmentAtStartDateWithCurrencyEffect)
+                .plus(totalInvestmentBeforeTransactionWithCurrencyEffect)
+                .mul(daysSinceLastOrder)
+            )
+                currentValues[order.date] = valueOfInvestment
+                currentValuesWithCurrencyEffect[order.date] =
+          valueOfInvestmentWithCurrencyEffect
+                netPerformanceValues[order.date] = grossPerformance
+          .minus(grossPerformanceAtStartDate)
+          .minus(fees.minus(feesAtStartDate))
+                netPerformanceValuesWithCurrencyEffect[order.date] =
+          grossPerformanceWithCurrencyEffect
+            .minus(grossPerformanceAtStartDateWithCurrencyEffect)
+            .minus(
+              feesWithCurrencyEffect.minus(feesAtStartDateWithCurrencyEffect)
+            )
+                investmentValuesAccumulated[order.date] = totalInvestment
+                investmentValuesAccumulatedWithCurrencyEffect[order.date] =
+          totalInvestmentWithCurrencyEffect
+                investmentValuesWithCurrencyEffect[order.date] = (
+          investmentValuesWithCurrencyEffect[order.date] or Big(0)
+        ).add(transactionInvestmentWithCurrencyEffect)
+                timeWeightedInvestmentValues[order.date] =
+          totalInvestmentDays > EPSILON
+            ? sumOfTimeWeightedInvestments.div(totalInvestmentDays)
+            : totalInvestment.gt(0)
+              ? totalInvestment
+              (0)
+                timeWeightedInvestmentValuesWithCurrencyEffect[order.date] =
+          totalInvestmentDays > EPSILON
+            ? sumOfTimeWeightedInvestmentsWithCurrencyEffect.div(
+                totalInvestmentDays
+              )
+            : totalInvestmentWithCurrencyEffect.gt(0)
+              ? totalInvestmentWithCurrencyEffect
+              (0)
+            if False:
+                # console.log('totalInvestment', totalInvestment.toNumber())
+                # console.log(
+          'totalInvestmentWithCurrencyEffect',
+          totalInvestmentWithCurrencyEffect.toNumber()
+        )
+                # console.log(
+          'totalGrossPerformance',
+          grossPerformance.minus(grossPerformanceAtStartDate).toNumber()
+        )
+                # console.log(
+          'totalGrossPerformanceWithCurrencyEffect',
+          grossPerformanceWithCurrencyEffect
+            .minus(grossPerformanceAtStartDateWithCurrencyEffect)
+            .toNumber()
+        )
+            if i == indexOfEndOrder:
+                break
+        totalGrossPerformance = grossPerformance.minus(
+      grossPerformanceAtStartDate
+    )
+        totalGrossPerformanceWithCurrencyEffect = grossPerformanceWithCurrencyEffect.minus(
+        grossPerformanceAtStartDateWithCurrencyEffect
+      )
+        totalNetPerformance = grossPerformance
+      .minus(grossPerformanceAtStartDate)
+      .minus(fees.minus(feesAtStartDate))
+        timeWeightedAverageInvestmentBetweenStartAndEndDate = totalInvestmentDays > 0
+        ? sumOfTimeWeightedInvestments.div(totalInvestmentDays)
+        (0)
+        timeWeightedAverageInvestmentBetweenStartAndEndDateWithCurrencyEffect = totalInvestmentDays > 0
+        ? sumOfTimeWeightedInvestmentsWithCurrencyEffect.div(
+            totalInvestmentDays
+          )
+        (0)
+        grossPerformancePercentage = timeWeightedAverageInvestmentBetweenStartAndEndDate.gt(0)
+        ? totalGrossPerformance.div(
+            timeWeightedAverageInvestmentBetweenStartAndEndDate
+          )
+        (0)
+        grossPerformancePercentageWithCurrencyEffect = timeWeightedAverageInvestmentBetweenStartAndEndDateWithCurrencyEffect.gt(
+        0
+      )
+        ? totalGrossPerformanceWithCurrencyEffect.div(
+            timeWeightedAverageInvestmentBetweenStartAndEndDateWithCurrencyEffect
+          )
+        (0)
+        feesPerUnit = totalUnits.gt(0)
+      ? fees.minus(feesAtStartDate).div(totalUnits)
+      (0)
+        feesPerUnitWithCurrencyEffect = totalUnits.gt(0)
+      ? feesWithCurrencyEffect
+          .minus(feesAtStartDateWithCurrencyEffect)
+          .div(totalUnits)
+      (0)
+        netPerformancePercentage = timeWeightedAverageInvestmentBetweenStartAndEndDate.gt(0)
+        ? totalNetPerformance.div(
+            timeWeightedAverageInvestmentBetweenStartAndEndDate
+          )
+        (0)
+        netPerformancePercentageWithCurrencyEffectMap = {}
+        netPerformanceWithCurrencyEffectMap = {}
+        for dateRange in [
+      '1d',
+      '1y',
+      '5y',
+      'max',
+      'mtd',
+      'wtd',
+      'ytd',
+      ...each_year_of_interval({ end, start })
+        .filter((date) => {
+          return not is_this_year(date);
+        })
+        .map((date) => {
+          return format_date(date, 'yyyy');
+        })
+    ] as DateRange[]:
+            dateInterval = get_interval_from_date_range(dateRange)
+            endDate = dateInterval.endDate
+            startDate = dateInterval.startDate
+            if is_before(startDate, start):
+                startDate = start
+            rangeEndDateString = format_date(endDate)
+            rangeStartDateString = format_date(startDate)
+            currentValuesAtDateRangeStartWithCurrencyEffect = currentValuesWithCurrencyEffect[rangeStartDateString] or Big(0)
+            investmentValuesAccumulatedAtStartDateWithCurrencyEffect = investmentValuesAccumulatedWithCurrencyEffect[rangeStartDateString] ??
+        Big(0)
+            grossPerformanceAtDateRangeStartWithCurrencyEffect = currentValuesAtDateRangeStartWithCurrencyEffect.minus(
+          investmentValuesAccumulatedAtStartDateWithCurrencyEffect
+        )
+            average = Big(0)
+            dayCount = 0
+            i = self.chartDates.length - 1
+            while i >= 0:
+                date = self.chartDates[i]
+                if date > rangeEndDateString:
+                    continue
+                elif date < rangeStartDateString:
+                    break
+                if 
+          investmentValuesAccumulatedWithCurrencyEffect[date] instanceof Big &&
+          investmentValuesAccumulatedWithCurrencyEffect[date].gt(0)
+        :
+                    average = average.add(
+            investmentValuesAccumulatedWithCurrencyEffect[date].add(
+              grossPerformanceAtDateRangeStartWithCurrencyEffect
+            )
+          )
+                    dayCount += 1
+                i -= 1
+            if dayCount > 0:
+                average = average.div(dayCount)
+            netPerformanceWithCurrencyEffectMap[dateRange] =
+        netPerformanceValuesWithCurrencyEffect[rangeEndDateString].minus(
+          // If the date range is 'max', take 0 as a start value. Otherwise,
+          // the value of the end of the day of the start date is taken which
+          // differs from the buying price.
+          dateRange == 'max'
+            ? Big(0)
+            : (netPerformanceValuesWithCurrencyEffect[rangeStartDateString] ??
+                Big(0))
+        ) or Big(0)
+            netPerformancePercentageWithCurrencyEffectMap[dateRange] = average.gt(0)
+        ? netPerformanceWithCurrencyEffectMap[dateRange].div(average)
+        (0)
+        if False:
+            # console.log(
+        `
+        ${symbol}
+        Unit price: ${orders[indexOfStartOrder].unitPrice.toFixed(
+          2
+        )} -> ${unitPriceAtEndDate.toFixed(2)}
+        Total investment: ${totalInvestment.toFixed(2)}
+        Total investment with currency effect: ${totalInvestmentWithCurrencyEffect.toFixed(
+          2
+        )}
+        Time weighted investment: ${timeWeightedAverageInvestmentBetweenStartAndEndDate.toFixed(
+          2
+        )}
+        Time weighted investment with currency effect: ${timeWeightedAverageInvestmentBetweenStartAndEndDateWithCurrencyEffect.toFixed(
+          2
+        )}
+        Total dividend: ${totalDividend.toFixed(2)}
+        Gross performance: ${totalGrossPerformance.toFixed(
+          2
+        )} / ${grossPerformancePercentage.mul(100).toFixed(2)}%
+        Gross performance with currency effect: ${totalGrossPerformanceWithCurrencyEffect.toFixed(
+          2
+        )} / ${grossPerformancePercentageWithCurrencyEffect
+          .mul(100)
+          .toFixed(2)}%
+        Fees per unit: ${feesPerUnit.toFixed(2)}
+        Fees per unit with currency effect: ${feesPerUnitWithCurrencyEffect.toFixed(
+          2
+        )}
+        Net performance: ${totalNetPerformance.toFixed(
+          2
+        )} / ${netPerformancePercentage.mul(100).toFixed(2)}%
+        Net performance with currency effect: ${netPerformancePercentageWithCurrencyEffectMap[
+          'max'
+        ].toFixed(2)}%`
+      )
         return {
-            "xRay": {
-                "categories": [
-                    {"key": "accounts", "name": "Accounts", "rules": []},
-                    {"key": "currencies", "name": "Currencies", "rules": []},
-                    {"key": "fees", "name": "Fees", "rules": []},
-                ],
-                "statistics": {"rulesActiveCount": 0, "rulesFulfilledCount": 0},
-            }
-        }
+      currentValues,
+      currentValuesWithCurrencyEffect,
+      feesWithCurrencyEffect,
+      grossPerformancePercentage,
+      grossPerformancePercentageWithCurrencyEffect,
+      initialValue,
+      initialValueWithCurrencyEffect,
+      investmentValuesAccumulated,
+      investmentValuesAccumulatedWithCurrencyEffect,
+      investmentValuesWithCurrencyEffect,
+      netPerformancePercentage,
+      netPerformancePercentageWithCurrencyEffectMap,
+      netPerformanceValues,
+      netPerformanceValuesWithCurrencyEffect,
+      netPerformanceWithCurrencyEffectMap,
+      timeWeightedInvestmentValues,
+      timeWeightedInvestmentValuesWithCurrencyEffect,
+      totalAccountBalanceInBaseCurrency,
+      totalDividend,
+      totalDividendInBaseCurrency,
+      totalInterest,
+      totalInterestInBaseCurrency,
+      totalInvestment,
+      totalInvestmentWithCurrencyEffect,
+      totalLiabilities,
+      totalLiabilitiesInBaseCurrency,
+      grossPerformance: totalGrossPerformance,
+      grossPerformanceWithCurrencyEffect:
+        totalGrossPerformanceWithCurrencyEffect,
+      hasErrors: totalUnits.gt(0) and (not initialValue or not unitPriceAtEndDate),
+      netPerformance: totalNetPerformance,
+      timeWeightedInvestment:
+        timeWeightedAverageInvestmentBetweenStartAndEndDate,
+      timeWeightedInvestmentWithCurrencyEffect:
+        timeWeightedAverageInvestmentBetweenStartAndEndDateWithCurrencyEffect
+    }

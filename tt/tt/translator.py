@@ -1,153 +1,193 @@
 """
-Minimal TypeScript to Python translator.
-
-This translator reads TypeScript source files and performs basic translations
-using regex-based transformations. It's a simple but lawful implementation that
-actually converts TypeScript code patterns to Python equivalents.
+TypeScript to Python translator using tree-sitter AST.
 """
 from __future__ import annotations
 
 import re
 from pathlib import Path
 
-
-def translate_typescript_file(ts_content: str) -> str:
-    """
-    Translate TypeScript code to Python.
-
-    This performs basic transformations:
-    - Class declarations
-    - Method definitions
-    - Simple return statements
-    - Variable declarations
-    """
-    python_code = ts_content
-
-    # Remove TypeScript imports (we'll add Python imports separately)
-    python_code = re.sub(r'^import\s+.*?;?\s*$', '', python_code, flags=re.MULTILINE)
-
-    # Translate class declarations: class Name extends Base { -> class Name(Base):
-    python_code = re.sub(
-        r'export\s+class\s+(\w+)\s+extends\s+(\w+)\s*\{',
-        r'class \1(\2):',
-        python_code
-    )
-
-    # Translate method definitions: protected methodName() { -> def methodName(self):
-    python_code = re.sub(
-        r'(protected|private|public)?\s*(\w+)\s*\([^)]*\)\s*\{',
-        lambda m: f"def {m.group(2)}(self):",
-        python_code
-    )
-
-    # Translate return statements with enum values
-    python_code = re.sub(
-        r'return\s+(\w+)\.(\w+);',
-        r'return "\2"',
-        python_code
-    )
-
-    # Remove closing braces
-    python_code = re.sub(r'^\s*\}\s*$', '', python_code, flags=re.MULTILINE)
-
-    # Clean up multiple blank lines
-    python_code = re.sub(r'\n\s*\n\s*\n+', '\n\n', python_code)
-
-    return python_code.strip()
+from .ts_parser import parse_typescript
+from .ast_utils import node_text, find_child, find_children, find_descendants
+from .py_emitter import PyEmitter
+from .statements import StatementTranslator
 
 
-def translate_roai_calculator(ts_file: Path, output_file: Path, stub_file: Path) -> None:
-    """
-    Translate the ROAI portfolio calculator from TypeScript to Python.
+def translate_typescript_to_python(ts_source: str) -> str:
+    """Translate a TypeScript source file to Python."""
+    tree, src_bytes = parse_typescript(ts_source)
+    root = tree.root_node
+    em = PyEmitter(src_bytes)
+    stmt = StatementTranslator(em)
 
-    For this minimal implementation, we:
-    1. Read the TypeScript source
-    2. Translate simple methods we can handle
-    3. Keep the stub implementation for complex methods
-    """
-    # Read the TypeScript source
-    ts_content = ts_file.read_text(encoding='utf-8')
+    for child in root.children:
+        if child.type == "export_statement":
+            inner = find_child(child, "class_declaration") or find_child(child, "class")
+            if inner:
+                _translate_class(inner, em, stmt, src_bytes)
+        elif child.type == "class_declaration":
+            _translate_class(child, em, stmt, src_bytes)
+        elif child.type in ("import_statement", "comment"):
+            continue
 
-    # Read the stub implementation
-    stub_content = stub_file.read_text(encoding='utf-8')
+    return em.result()
 
-    # Extract the getPerformanceCalculationType method from TypeScript
-    # This is a simple method we can translate
-    perf_type_match = re.search(
-        r'protected\s+getPerformanceCalculationType\s*\(\s*\)\s*\{[^}]+\}',
-        ts_content,
-        re.DOTALL
-    )
 
-    if perf_type_match:
-        # Translate this method
-        ts_method = perf_type_match.group(0)
-        py_method = translate_typescript_file(ts_method)
+def _translate_class(node, em, stmt, src_bytes):
+    """Translate a class declaration."""
+    name_node = find_child(node, "type_identifier") or find_child(node, "identifier")
+    class_name = node_text(name_node, src_bytes) if name_node else "TranslatedClass"
 
-        # Add proper indentation
-        py_method = '\n'.join('    ' + line if line.strip() else line
-                              for line in py_method.split('\n'))
+    heritage = find_child(node, "class_heritage")
+    parent_name = None
+    if heritage:
+        parent_id = find_descendants(heritage, "type_identifier") or find_descendants(heritage, "identifier")
+        if parent_id:
+            parent_name = node_text(parent_id[0], src_bytes)
 
-        # Insert a comment showing this was translated
-        translated_section = (
-            "    # --- Translated from TypeScript ---\n"
-            + py_method + "\n"
-            "    # --- End translated section ---\n"
-        )
-
-        # Insert this into the stub class before the closing
-        # Find the last method in the stub and add our translated method after it
-        output_content = stub_content.replace(
-            '            }\n        }',
-            '            }\n        }\n\n' + translated_section
-        )
-
-        # Actually, let's just add it before the last method
-        lines = stub_content.split('\n')
-        # Find where to insert (before the last method)
-        for i in range(len(lines) - 1, 0, -1):
-            if lines[i].strip().startswith('def '):
-                lines.insert(i, translated_section)
-                break
-
-        output_content = '\n'.join(lines)
+    if parent_name:
+        em.emit(f"class {class_name}({parent_name}):")
     else:
-        output_content = stub_content
+        em.emit(f"class {class_name}:")
 
-    # Write the output
-    output_file.parent.mkdir(parents=True, exist_ok=True)
-    output_file.write_text(output_content, encoding='utf-8')
+    em.indent += 1
+    em.emit_blank()
+
+    body = find_child(node, "class_body")
+    if not body:
+        em.emit("pass")
+        em.indent -= 1
+        return
+
+    has_content = False
+    for member in body.children:
+        if member.type == "method_definition":
+            _translate_method(member, em, stmt, src_bytes)
+            has_content = True
+        elif member.type in ("public_field_definition", "property_definition"):
+            _translate_field(member, em, src_bytes)
+            has_content = True
+
+    if not has_content:
+        em.emit("pass")
+    em.indent -= 1
+
+
+def _translate_method(node, em, stmt, src_bytes):
+    """Translate a method definition."""
+    name_node = find_child(node, "property_identifier")
+    method_name = node_text(name_node, src_bytes) if name_node else "_unknown"
+
+    params_node = find_child(node, "formal_parameters")
+    params = _extract_params(params_node, src_bytes) if params_node else []
+    all_params = ["self"] + params
+
+    em.emit_blank()
+    em.emit(f"def {method_name}({', '.join(all_params)}):")
+    em.indent += 1
+
+    body = find_child(node, "statement_block")
+    if body:
+        meaningful = [c for c in body.children if c.type not in ("{", "}", ";")]
+        if meaningful:
+            stmt.translate_statements(body)
+        else:
+            em.emit("pass")
+    else:
+        em.emit("pass")
+    em.indent -= 1
+
+
+def _translate_field(node, em, src_bytes):
+    """Translate a class field."""
+    raw = em._basic_translate(node_text(node, src_bytes)).rstrip(";").strip()
+    if "=" in raw:
+        em.emit(f"# field: {raw}")
+
+
+def _extract_params(params_node, src_bytes):
+    """Extract parameter names from formal_parameters."""
+    params = []
+    for child in params_node.children:
+        if child.type in ("(", ")", ","):
+            continue
+        if child.type in ("required_parameter", "optional_parameter"):
+            ident = find_child(child, "identifier")
+            if ident:
+                params.append(node_text(ident, src_bytes))
+            else:
+                obj_pattern = find_child(child, "object_pattern")
+                if obj_pattern:
+                    params.append("**kwargs")
+                else:
+                    raw = node_text(child, src_bytes)
+                    name = re.sub(r'\s*[:?].*$', '', raw).strip()
+                    name = re.sub(r'^(readonly|public|private|protected)\s+', '', name)
+                    if name:
+                        params.append(name)
+        elif child.type == "rest_parameter":
+            ident = find_child(child, "identifier")
+            if ident:
+                params.append(f"*{node_text(ident, src_bytes)}")
+    return params
+
+
+def _postprocess(code: str) -> str:
+    """Fix common translation artifacts."""
+    code = code.replace("self.self.", "self.")
+    code = re.sub(r'\n{3,}', '\n\n', code)
+    return code
+
+
+HEADER = '''"""ROAI Portfolio Calculator — translated from TypeScript by tt."""
+from __future__ import annotations
+
+import sys
+from datetime import datetime, timedelta
+from typing import Any
+
+from app.wrapper.portfolio.calculator.portfolio_calculator import PortfolioCalculator
+from app.implementation.portfolio.calculator.helpers import (
+    Big, DATE_FORMAT, EPSILON, INVESTMENT_ACTIVITY_TYPES,
+    add_milliseconds, clone_deep, difference_in_days,
+    each_year_of_interval, end_of_day, end_of_year,
+    format_date, get_factor, get_interval_from_date_range,
+    is_after, is_before, is_this_year, is_within_interval,
+    min_date, parse_date, reset_hours, sort_by,
+    start_of_day, start_of_year, sub_days,
+)
+
+'''
 
 
 def run_translation(repo_root: Path, output_dir: Path) -> None:
-    """Run the translation process."""
-    # Source TypeScript file
-    ts_source = (
+    """Run the full translation pipeline."""
+    ts_roai = (
         repo_root / "projects" / "ghostfolio" / "apps" / "api" / "src"
         / "app" / "portfolio" / "calculator" / "roai" / "portfolio-calculator.ts"
     )
-
-    # Stub file from the example
-    stub_source = (
-        repo_root / "translations" / "ghostfolio_pytx_example" / "app"
-        / "implementation" / "portfolio" / "calculator" / "roai"
-        / "portfolio_calculator.py"
+    ts_base = (
+        repo_root / "projects" / "ghostfolio" / "apps" / "api" / "src"
+        / "app" / "portfolio" / "calculator" / "portfolio-calculator.ts"
     )
-
-    # Output file
     output_file = (
         output_dir / "app" / "implementation" / "portfolio" / "calculator"
         / "roai" / "portfolio_calculator.py"
     )
 
-    if not ts_source.exists():
-        print(f"Warning: TypeScript source not found: {ts_source}")
+    if not ts_roai.exists():
+        print(f"Warning: TypeScript source not found: {ts_roai}")
         return
 
-    if not stub_source.exists():
-        print(f"Warning: Stub file not found: {stub_source}")
-        return
+    print(f"Translating {ts_roai.name} using tree-sitter AST...")
+    ts_source = ts_roai.read_text(encoding="utf-8")
 
-    print(f"Translating {ts_source.name}...")
-    translate_roai_calculator(ts_source, output_file, stub_source)
+    translated = translate_typescript_to_python(ts_source)
+    translated = _postprocess(translated)
+    final_code = HEADER + translated + "\n"
+
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    output_file.write_text(final_code, encoding="utf-8")
     print(f"  Translated → {output_file}")
+
+
+
