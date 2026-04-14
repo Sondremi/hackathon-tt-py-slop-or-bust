@@ -136,16 +136,13 @@ class PyEmitter:
             r'\2 in \1',
             text,
         )
-        # .filter(arrow) multiline cleanup — strip leftover
-        text = re.sub(
-            r'\.filter\(\s*\(\{[^}]*\}\)\s*=>\s*\{[^}]*\}\s*\)',
-            '', text,
-        )
-        # .map(arrow) with destructure + return
-        text = re.sub(
-            r'\.map\(\s*\(\{[^}]*\}\)\s*=>\s*\{[^}]*\}\s*\)',
-            '', text,
-        )
+        # Clean up multiline statements — join lines broken at =
+        text = re.sub(r'=\s*$', '= ', text, flags=re.MULTILINE)
+        text = re.sub(r'(=\s+)\s+\n\s+', r'\1 ', text)
+        # Join continuation lines
+        lines = text.split('\n')
+        text = ' '.join(lines)
+        text = re.sub(r'\s+', ' ', text)  # Normalize whitespace
 
         return text
 

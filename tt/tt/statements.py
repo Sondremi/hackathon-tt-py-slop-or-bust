@@ -164,11 +164,63 @@ class StatementTranslator:
     def _convert_object_to_dict(self, text: str) -> str:
         """Convert JS object literal to Python dict literal."""
         text = text.strip()
-        if text.startswith('{') and text.endswith('}'):
-            # Replace shorthand properties: { foo, bar } → {"foo": foo, "bar": bar}
-            # This is a simplification — complex objects should be handled at AST level
-            pass
-        return text
+        if not (text.startswith('{') and text.endswith('}')):
+            return text
+        
+        # Remove outer braces
+        inner = text[1:-1].strip()
+        if not inner:
+            return '{}'
+        
+        # Split by comma, but be careful with nested braces
+        parts = []
+        current = ''
+        depth = 0
+        i = 0
+        while i < len(inner):
+            ch = inner[i]
+            if ch == '{' or ch == '[':
+                depth += 1
+            elif ch == '}' or ch == ']':
+                depth -= 1
+            elif ch == ',' and depth == 0:
+                parts.append(current.strip())
+                current = ''
+                i += 1
+                continue
+            current += ch
+            i += 1
+        if current.strip():
+            parts.append(current.strip())
+        
+        # Convert each part
+        result_parts = []
+        for part in parts:
+            part = part.strip()
+            if not part:
+                continue
+            
+            # If has ':' it's key-value
+            if ':' in part and not part.startswith("'") and not part.startswith('"'):
+                # Standard key: value → keep as is (but could be shorthand key)
+                key_val = part.split(':', 1)
+                key = key_val[0].strip()
+                val = key_val[1].strip()
+                # quoted key?
+                if not key.startswith("'") and not key.startswith('"'):
+                    key = f"'{key}'"
+                result_parts.append(f'{key}: {val}')
+            else:
+                # Shorthand: { foo } → {'foo': foo}
+                # Or method: { foo() { ... } }
+                if '(' in part and ')' in part:
+                    # Skip methods
+                    continue
+                else:
+                    var_name = part
+                    result_parts.append(f"'{var_name}': {var_name}")
+        
+        return '{' + ', '.join(result_parts) + '}'
 
     def _stmt_if(self, node) -> None:
         """Translate if/else if/else statements."""
@@ -476,28 +528,40 @@ class StatementTranslator:
 
     def _translate_collection(self, raw: str, loop_var: str) -> str:
         """Translate a collection expression, handling .filter() etc."""
+        raw = raw.strip()
+        # Normalize whitespace in pattern
+        raw_norm = re.sub(r'\s+', ' ', raw)
+        
         # Pattern: x.filter(({ prop }) => { return prop; })
         m = re.search(
             r'^(.+?)\.filter\(\s*'
             r'\(\{\s*(\w+)\s*\}\)\s*=>\s*\{?\s*'
             r'return\s+(\w+)\s*;?\s*\}?\s*\)$',
-            raw, re.DOTALL,
+            raw_norm, re.DOTALL,
         )
         if m:
             coll = self.em._basic_translate(m.group(1))
             prop = m.group(2)
-            return f'[{loop_var} for {loop_var} in {coll} if {loop_var}.get("{prop}")]'
+            return_val = m.group(3)
+            # If return value is same as the destructured prop, check truthiness
+            if return_val == prop:
+                return f'[{loop_var} for {loop_var} in {coll} if {loop_var}.get("{prop}")]'
+            else:
+                return f'[{loop_var} for {loop_var} in {coll} if {loop_var}.get("{return_val}")]'
 
-        # Pattern: x.filter(({ prop }) => prop)
+        # Pattern: x.filter(({ prop }) => prop) - implicit return
         m = re.search(
             r'^(.+?)\.filter\(\s*'
             r'\(\{\s*(\w+)\s*\}\)\s*=>\s*\2\s*\)$',
-            raw, re.DOTALL,
+            raw_norm, re.DOTALL,
         )
         if m:
             coll = self.em._basic_translate(m.group(1))
             prop = m.group(2)
             return f'[{loop_var} for {loop_var} in {coll} if {loop_var}.get("{prop}")]'
+        
+        # Fallback: just return translated collection
+        return self.em._basic_translate(raw)
 
         # Pattern: x.filter(item => condition)
         m = re.search(

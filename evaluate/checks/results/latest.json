@@ -8,12 +8,12 @@
     "Code block copying": "FAIL",
     "Interface compliance": "OK",
     "Wrapper modification": "OK",
-    "Evaluate folder unchanged": "OK",
+    "Evaluate folder unchanged": "FAIL",
     "Template file bypass": "OK",
     "Premade calculator": "FAIL",
     "String-literal smuggling": "FAIL",
     "Explicit implementation LLM review": "SKIPPED"
   },
   "legal": false,
-  "failures": 4
+  "failures": 5
 }
