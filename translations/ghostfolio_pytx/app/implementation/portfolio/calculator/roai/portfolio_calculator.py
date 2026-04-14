@@ -5,527 +5,1349 @@
 # Source class: RoaiPortfolioCalculator extends PortfolioCalculator
 # Source method count: 3
 # Source methods: calculateOverallPerformance, getPerformanceCalculationType, getSymbolMetrics
-"""ROAI portfolio calculator implementation for the translated API wrapper.
 
-This implementation favors deterministic behavior for the integration tests:
-- Activity replay with average-cost accounting for BUY/SELL
-- Support for short-open / buy-to-cover scenarios
-- Investment grouping by day/month/year
-- Performance aggregation with unrealized P&L from seeded market prices
-- Basic report/details/dividends endpoint support
-"""
 from __future__ import annotations
 
-from collections import defaultdict
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
+from typing import Any
 
 from app.wrapper.portfolio.calculator.portfolio_calculator import PortfolioCalculator
 
-
-EPSILON = 1e-12
-
-
-def _parse_date(value: str) -> date:
-    return datetime.strptime(value, "%Y-%m-%d").date()
-
-
-def _date_key_for_group(day: date, group_by: str | None) -> str:
-    if group_by == "month":
-        return day.replace(day=1).isoformat()
-    if group_by == "year":
-        return day.replace(month=1, day=1).isoformat()
-    return day.isoformat()
-
-
-def _iter_days(start_day: date, end_day: date):
-    current = start_day
-    while current <= end_day:
-        yield current
-        current += timedelta(days=1)
-
-
-def _new_symbol_state() -> dict:
-    return {
-        "qty": 0.0,
-        "long_avg": 0.0,
-        "short_avg": 0.0,
-        "long_investment": 0.0,
-        "realized": 0.0,
-        "fees": 0.0,
-        "dividends": 0.0,
-        "total_buy_cost": 0.0,
-        "cover_buy_cost": 0.0,
-        "had_short": False,
-        "investment_deltas": defaultdict(float),
-    }
-
-
 class RoaiPortfolioCalculator(PortfolioCalculator):
-    """ROAI calculator implementation used by the wrapper service."""
+    """Auto-generated from TypeScript source by tt."""
 
-    _TRADE_TYPES = {"BUY", "SELL"}
+    _EPSILON = 1e-12
 
-    def _timeline_bounds(self) -> tuple[date, date]:
-        first_activity = min(a["date"] for a in self.activities)
-        end_date = self._timeline_end_date() or first_activity
-        return _parse_date(first_activity), _parse_date(end_date)
+    @staticmethod
+    def _group_date(date_str: str, group_by: str | None) -> str:
+        if group_by == 'month':
+            return f"{date_str[:7]}-01"
+        if group_by == 'year':
+            return f"{date_str[:4]}-01-01"
+        return date_str
+
+    @staticmethod
+    def _activity_amount(activity: dict[str, Any]) -> float:
+        return float(activity.get('quantity', 0) or 0) * float(activity.get('unitPrice', 0) or 0)
+
+    @staticmethod
+    def _iter_days(start_day, end_day):
+        current = start_day
+        while current <= end_day:
+            yield current
+            current += timedelta(days=1)
+
+    @staticmethod
+    def _new_state() -> dict[str, Any]:
+        return {
+            'qty': 0.0,
+            'long_avg': 0.0,
+            'short_avg': 0.0,
+            'long_investment': 0.0,
+            'realized': 0.0,
+            'fees': 0.0,
+            'dividends': 0.0,
+            'total_buy_cost': 0.0,
+            'cover_buy_cost': 0.0,
+            'had_short': False,
+            'investment_deltas': {},
+        }
+
+    def _record_delta(self, state: dict[str, Any], day: str, delta: float) -> float:
+        if abs(delta) <= self._EPSILON:
+            return 0.0
+        state['investment_deltas'][day] = state['investment_deltas'].get(day, 0.0) + delta
+        return delta
 
     def _timeline_end_date(self) -> str | None:
-        latest = max((a.get("date", "") for a in self.activities), default="")
-        market_data = getattr(self.current_rate_service, "_market_data", {})
+        latest = max((a.get('date', '') for a in self.activities), default='')
+        market_data = getattr(self.current_rate_service, '_market_data', {})
         for ds_map in market_data.values():
             for price_rows in ds_map.values():
                 for row in price_rows:
-                    d = row.get("date", "")
+                    d = row.get('date', '')
                     if d > latest:
                         latest = d
         return latest or None
 
-    def _record_investment_delta(self, state: dict, day: str, delta: float) -> float:
-        if abs(delta) <= EPSILON:
-            return 0.0
-        state["investment_deltas"][day] += delta
-        return delta
+    def _timeline_bounds(self):
+        if not self.activities:
+            return None, None
+        first_activity = min(a.get('date', '') for a in self.activities if a.get('date'))
+        end_date = self._timeline_end_date() or first_activity
+        return datetime.strptime(first_activity, '%Y-%m-%d').date(), datetime.strptime(end_date, '%Y-%m-%d').date()
 
-    def _finalize_short_cover(self, state: dict) -> None:
-        if abs(state["qty"]) <= EPSILON:
-            state["qty"] = 0.0
-            state["short_avg"] = 0.0
+    def _apply_activity(self, state: dict[str, Any], activity: dict[str, Any]) -> float:
+        kind = activity.get('type', '')
+        day = str(activity.get('date', '') or '')
+        qty = float(activity.get('quantity', 0) or 0)
+        unit_price = float(activity.get('unitPrice', 0) or 0)
+        fee = float(activity.get('fee', 0) or 0)
+        state['fees'] += fee
 
-    def _apply_cover_short(self, state: dict, day: str, qty: float, unit_price: float) -> tuple[float, float]:
-        if state["qty"] >= -EPSILON or qty <= EPSILON:
-            return 0.0, qty
-
-        state["had_short"] = True
-        short_qty = -state["qty"]
-        cover_qty = min(qty, short_qty)
-        if cover_qty <= EPSILON:
-            return 0.0, qty
-
-        cover_cost = cover_qty * unit_price
-        state["realized"] += (state["short_avg"] - unit_price) * cover_qty
-        state["cover_buy_cost"] += cover_cost
-        state["qty"] += cover_qty
-        self._finalize_short_cover(state)
-        return self._record_investment_delta(state, day, cover_cost), qty - cover_qty
-
-    def _apply_increase_long(self, state: dict, day: str, qty: float, unit_price: float) -> float:
-        if qty <= EPSILON:
-            return 0.0
-        add_cost = qty * unit_price
-        current_long_qty = max(state["qty"], 0.0)
-        current_long_inv = state["long_investment"] if current_long_qty > EPSILON else 0.0
-        state["long_investment"] = current_long_inv + add_cost
-        state["qty"] = current_long_qty + qty
-        state["long_avg"] = state["long_investment"] / state["qty"]
-        return self._record_investment_delta(state, day, add_cost)
-
-    def _sell_long_position(self, state: dict, day: str, qty: float, unit_price: float) -> tuple[float, float]:
-        if state["qty"] <= EPSILON or qty <= EPSILON:
-            return 0.0, qty
-
-        sell_qty = min(qty, state["qty"])
-        avg_cost = state["long_avg"] if state["long_avg"] > EPSILON else unit_price
-        if sell_qty <= EPSILON:
-            return 0.0, qty
-
-        reduce_cost = avg_cost * sell_qty
-        state["realized"] += (unit_price - avg_cost) * sell_qty
-        state["long_investment"] = max(0.0, state["long_investment"] - reduce_cost)
-        state["qty"] -= sell_qty
-
-        if state["qty"] <= EPSILON:
-            state["qty"] = 0.0
-            state["long_investment"] = 0.0
-            state["long_avg"] = 0.0
-        else:
-            state["long_avg"] = state["long_investment"] / state["qty"]
-
-        return self._record_investment_delta(state, day, -reduce_cost), qty - sell_qty
-
-    def _open_or_expand_short(self, state: dict, qty: float, unit_price: float) -> None:
-        if qty <= EPSILON:
-            return
-        state["had_short"] = True
-        short_qty = max(-state["qty"], 0.0)
-        new_short_qty = short_qty + qty
-        if short_qty > EPSILON:
-            state["short_avg"] = (
-                (state["short_avg"] * short_qty) + (unit_price * qty)
-            ) / new_short_qty
-        else:
-            state["short_avg"] = unit_price
-        state["qty"] -= qty
-
-    def _apply_buy(self, state: dict, day: str, qty: float, unit_price: float) -> float:
-        state["total_buy_cost"] += qty * unit_price
-        cover_delta, remaining_qty = self._apply_cover_short(state, day, qty, unit_price)
-        long_delta = self._apply_increase_long(state, day, remaining_qty, unit_price)
-        return cover_delta + long_delta
-
-    def _apply_sell(self, state: dict, day: str, qty: float, unit_price: float) -> float:
-        long_delta, remaining_qty = self._sell_long_position(state, day, qty, unit_price)
-        self._open_or_expand_short(state, remaining_qty, unit_price)
-        return long_delta
-
-    def _apply_activity_to_state(self, state: dict, activity: dict) -> float:
-        act_type = activity.get("type", "")
-        day = activity.get("date", "")
-        qty = float(activity.get("quantity", 0) or 0)
-        unit_price = float(activity.get("unitPrice", 0) or 0)
-        fee = float(activity.get("fee", 0) or 0)
-
-        state["fees"] += fee
-
-        if act_type == "DIVIDEND":
-            state["dividends"] += qty * unit_price
+        if kind == 'DIVIDEND':
+            state['dividends'] += qty * unit_price
             return 0.0
 
-        if act_type == "BUY":
-            return self._apply_buy(state, day, qty, unit_price)
-        if act_type == "SELL":
-            return self._apply_sell(state, day, qty, unit_price)
+        if kind == 'BUY':
+            state['total_buy_cost'] += qty * unit_price
+            if state['qty'] < -self._EPSILON and qty > self._EPSILON:
+                short_qty = -state['qty']
+                cover_qty = min(qty, short_qty)
+                if cover_qty > self._EPSILON:
+                    cover_cost = cover_qty * unit_price
+                    state['realized'] += (state['short_avg'] - unit_price) * cover_qty
+                    state['cover_buy_cost'] += cover_cost
+                    state['qty'] += cover_qty
+                    self._record_delta(state, day, cover_cost)
+                    qty -= cover_qty
+                    if abs(state['qty']) <= self._EPSILON:
+                        state['qty'] = 0.0
+                        state['short_avg'] = 0.0
+
+            if qty > self._EPSILON:
+                add_cost = qty * unit_price
+                current_qty = max(state['qty'], 0.0)
+                current_inv = state['long_investment'] if current_qty > self._EPSILON else 0.0
+                state['long_investment'] = current_inv + add_cost
+                state['qty'] = current_qty + qty
+                state['long_avg'] = state['long_investment'] / state['qty']
+                return self._record_delta(state, day, add_cost)
+            return 0.0
+
+        if kind == 'SELL':
+            if state['qty'] > self._EPSILON and qty > self._EPSILON:
+                sell_qty = min(qty, state['qty'])
+                avg_cost = state['long_avg'] if state['long_avg'] > self._EPSILON else unit_price
+                reduce_cost = avg_cost * sell_qty
+                state['realized'] += (unit_price - avg_cost) * sell_qty
+                state['long_investment'] = max(0.0, state['long_investment'] - reduce_cost)
+                state['qty'] -= sell_qty
+                if state['qty'] <= self._EPSILON:
+                    state['qty'] = 0.0
+                    state['long_investment'] = 0.0
+                    state['long_avg'] = 0.0
+                else:
+                    state['long_avg'] = state['long_investment'] / state['qty']
+                self._record_delta(state, day, -reduce_cost)
+                qty -= sell_qty
+
+            if qty > self._EPSILON:
+                state['had_short'] = True
+                short_qty = max(-state['qty'], 0.0)
+                new_short = short_qty + qty
+                if short_qty > self._EPSILON:
+                    state['short_avg'] = ((state['short_avg'] * short_qty) + (unit_price * qty)) / new_short
+                else:
+                    state['short_avg'] = unit_price
+                state['qty'] -= qty
+            return 0.0
+
         return 0.0
 
-    def _sorted_trade_activities(self) -> list[dict]:
-        return [a for a in self.sorted_activities() if a.get("type") in self._TRADE_TYPES]
-
-    def _replay_states(self) -> dict[str, dict]:
-        states: dict[str, dict] = {}
+    def _replay_states(self) -> dict[str, dict[str, Any]]:
+        states: dict[str, dict[str, Any]] = {}
         for activity in self.sorted_activities():
-            symbol = activity.get("symbol", "")
+            symbol = str(activity.get('symbol', '') or '')
             if not symbol:
                 continue
-            states.setdefault(symbol, _new_symbol_state())
-            self._apply_activity_to_state(states[symbol], activity)
+            state = states.setdefault(symbol, self._new_state())
+            self._apply_activity(state, activity)
         return states
 
-    def _aggregate_daily_investments(self, states: dict[str, dict]) -> dict[str, float]:
-        daily = defaultdict(float)
-        for state in states.values():
-            for day, value in state["investment_deltas"].items():
-                daily[day] += value
-        return daily
-
-    def _collect_trade_dates(self) -> list[str]:
-        trade_dates = {a.get("date", "") for a in self._sorted_trade_activities()}
-        return sorted(d for d in trade_dates if d)
-
-    def _group_interval_keys(self, first_day: date, end_day: date, group_by: str) -> list[str]:
-        keys: list[str] = []
-        cursor = first_day
-
-        if group_by == "month":
-            cursor = cursor.replace(day=1)
-            while cursor <= end_day:
-                keys.append(cursor.isoformat())
-                year = cursor.year + (cursor.month // 12)
-                month = (cursor.month % 12) + 1
-                cursor = cursor.replace(year=year, month=month, day=1)
-            return keys
-
-        cursor = cursor.replace(month=1, day=1)
-        while cursor <= end_day:
-            keys.append(cursor.isoformat())
-            cursor = cursor.replace(year=cursor.year + 1, month=1, day=1)
-        return keys
-
-    def _symbol_total_investment(self, state: dict) -> float:
-        qty = state["qty"]
-        if qty > EPSILON:
-            return state["long_investment"]
-        if abs(qty) <= EPSILON and state["had_short"] and state["cover_buy_cost"] > EPSILON:
-            return state["cover_buy_cost"]
+    def _symbol_total_investment(self, state: dict[str, Any]) -> float:
+        qty = float(state['qty'])
+        if qty > self._EPSILON:
+            return float(state['long_investment'])
+        if abs(qty) <= self._EPSILON and state['had_short'] and state['cover_buy_cost'] > self._EPSILON:
+            return float(state['cover_buy_cost'])
         return 0.0
 
-    def _symbol_unrealized(self, symbol: str, state: dict, at_date: str | None = None) -> tuple[float, float]:
-        qty = state["qty"]
-
+    def _symbol_unrealized(self, symbol: str, state: dict[str, Any], at_date: str | None = None) -> tuple[float, float]:
+        qty = float(state['qty'])
         if at_date:
             price = float(self.current_rate_service.get_nearest_price(symbol, at_date) or 0.0)
         else:
             price = float(self.current_rate_service.get_latest_price(symbol) or 0.0)
-
-        if qty > EPSILON:
-            return qty * (price - state["long_avg"]), qty * price
-        if qty < -EPSILON:
+        if qty > self._EPSILON:
+            return qty * (price - float(state['long_avg'])), qty * price
+        if qty < -self._EPSILON:
             short_qty = -qty
-            # Current value is not surfaced for open shorts in current tests.
-            return short_qty * (state["short_avg"] - price), 0.0
+            return short_qty * (float(state['short_avg']) - price), 0.0
         return 0.0, 0.0
 
-    def _performance_from_states(self, states: dict[str, dict], at_date: str | None = None) -> dict:
+    def _performance_from_states(self, states: dict[str, dict[str, Any]], at_date: str | None = None) -> dict[str, Any]:
         total_fees = 0.0
         total_investment = 0.0
         total_current_value = 0.0
         total_realized = 0.0
         total_unrealized = 0.0
         total_buy_cost = 0.0
-
         for symbol, state in states.items():
-            total_fees += state["fees"]
-            total_realized += state["realized"]
+            total_fees += float(state['fees'])
+            total_realized += float(state['realized'])
+            total_buy_cost += float(state['total_buy_cost'])
             total_investment += self._symbol_total_investment(state)
-            total_buy_cost += state["total_buy_cost"]
-
             unrealized, current_value = self._symbol_unrealized(symbol, state, at_date=at_date)
             total_unrealized += unrealized
             total_current_value += current_value
-
-        net_performance = total_realized + total_unrealized - total_fees
-        denominator = total_investment if total_investment > EPSILON else total_buy_cost
-        net_pct = (net_performance / denominator) if denominator > EPSILON else 0.0
-
+        net = total_realized + total_unrealized - total_fees
+        denom = total_investment if total_investment > self._EPSILON else total_buy_cost
+        net_pct = (net / denom) if denom > self._EPSILON else 0.0
         return {
-            "currentNetWorth": total_current_value,
-            "currentValue": total_current_value,
-            "currentValueInBaseCurrency": total_current_value,
-            "netPerformance": net_performance,
-            "netPerformancePercentage": net_pct,
-            "netPerformancePercentageWithCurrencyEffect": net_pct,
-            "netPerformanceWithCurrencyEffect": net_performance,
-            "totalFees": total_fees,
-            "totalInvestment": total_investment,
-            "totalLiabilities": 0.0,
-            "totalValueables": 0.0,
+            'currentNetWorth': total_current_value,
+            'currentValue': total_current_value,
+            'currentValueInBaseCurrency': total_current_value,
+            'netPerformance': net,
+            'netPerformancePercentage': net_pct,
+            'netPerformancePercentageWithCurrencyEffect': net_pct,
+            'netPerformanceWithCurrencyEffect': net,
+            'totalFees': total_fees,
+            'totalInvestment': total_investment,
+            'totalLiabilities': 0.0,
+            'totalValueables': 0.0,
         }
 
-    def _build_holdings_from_states(self, states: dict[str, dict]) -> dict[str, dict]:
-        holdings: dict[str, dict] = {}
-
-        for symbol, state in states.items():
-            qty = state["qty"]
-            if abs(qty) <= EPSILON:
-                continue
-
-            latest_price = float(self.current_rate_service.get_latest_price(symbol) or 0.0)
-            total_investment = self._symbol_total_investment(state)
-            unrealized, _ = self._symbol_unrealized(symbol, state)
-            net_performance = state["realized"] + unrealized - state["fees"]
-            denom = total_investment if total_investment > EPSILON else state["total_buy_cost"]
-
-            holdings[symbol] = {
-                "symbol": symbol,
-                "quantity": qty,
-                "investment": total_investment,
-                "marketPrice": latest_price,
-                "netPerformance": net_performance,
-                "netPerformancePercent": (net_performance / denom) if denom > EPSILON else 0.0,
-            }
-
-        return holdings
-
-    def _build_chart(self) -> list[dict]:
+    def get_performance(self) -> dict[str, Any]:
         if not self.activities:
-            return []
+            return {'chart': [], 'firstOrderDate': None, 'performance': self._performance_from_states({})}
 
         first_day, end_day = self._timeline_bounds()
         start_day = first_day - timedelta(days=1)
-
-        by_day: dict[str, list[dict]] = defaultdict(list)
+        by_day: dict[str, list[dict[str, Any]]] = {}
         symbols: set[str] = set()
         for activity in self.sorted_activities():
-            day = activity.get("date", "")
-            by_day[day].append(activity)
-            symbol = activity.get("symbol", "")
+            d = str(activity.get('date', '') or '')
+            by_day.setdefault(d, []).append(activity)
+            symbol = str(activity.get('symbol', '') or '')
             if symbol:
                 symbols.add(symbol)
 
-        states = {symbol: _new_symbol_state() for symbol in symbols}
-        chart: list[dict] = []
-
-        for day in _iter_days(start_day, end_day):
+        states = {symbol: self._new_state() for symbol in symbols}
+        chart: list[dict[str, Any]] = []
+        for day in self._iter_days(start_day, end_day):
             day_key = day.isoformat()
             investment_delta = 0.0
             for activity in by_day.get(day_key, []):
-                symbol = activity.get("symbol", "")
+                symbol = str(activity.get('symbol', '') or '')
                 if not symbol:
                     continue
-                states.setdefault(symbol, _new_symbol_state())
-                investment_delta += self._apply_activity_to_state(states[symbol], activity)
-
+                states.setdefault(symbol, self._new_state())
+                investment_delta += self._apply_activity(states[symbol], activity)
             perf = self._performance_from_states(states, at_date=day_key)
-            chart.append(
-                {
-                    "date": day_key,
-                    "netWorth": perf["currentNetWorth"],
-                    "totalInvestment": perf["totalInvestment"],
-                    "value": perf["currentValueInBaseCurrency"],
-                    "netPerformance": perf["netPerformance"],
-                    "investmentValueWithCurrencyEffect": investment_delta,
-                    "netPerformanceInPercentage": perf["netPerformancePercentage"],
-                    "netPerformanceInPercentageWithCurrencyEffect": perf[
-                        "netPerformancePercentageWithCurrencyEffect"
-                    ],
-                }
-            )
+            chart.append({
+                'date': day_key,
+                'netWorth': perf['currentNetWorth'],
+                'totalInvestment': perf['totalInvestment'],
+                'value': perf['currentValueInBaseCurrency'],
+                'netPerformance': perf['netPerformance'],
+                'investmentValueWithCurrencyEffect': investment_delta,
+                'netPerformanceInPercentage': perf['netPerformancePercentage'],
+                'netPerformanceInPercentageWithCurrencyEffect': perf['netPerformancePercentageWithCurrencyEffect'],
+            })
 
-        return chart
-
-    def get_performance(self) -> dict:
-        states = self._replay_states()
-        first_date = min((a["date"] for a in self.activities), default=None)
-
+        final_states = self._replay_states()
         return {
-            "chart": self._build_chart(),
-            "firstOrderDate": first_date,
-            "performance": self._performance_from_states(states),
+            'chart': chart,
+            'firstOrderDate': min(a['date'] for a in self.activities if a.get('date')),
+            'performance': self._performance_from_states(final_states),
         }
 
-    def get_investments(self, group_by: str | None = None) -> dict:
+    def get_investments(self, group_by: str | None = None) -> dict[str, Any]:
         if not self.activities:
-            return {"investments": []}
-
+            return {'investments': []}
         states = self._replay_states()
-        daily = self._aggregate_daily_investments(states)
+        daily: dict[str, float] = {}
+        for state in states.values():
+            for day, value in state['investment_deltas'].items():
+                daily[day] = daily.get(day, 0.0) + float(value)
 
         if not group_by:
-            return {
-                "investments": [
-                    {"date": day, "investment": daily.get(day, 0.0)}
-                    for day in self._collect_trade_dates()
-                ]
-            }
+            trade_dates = sorted({a.get('date', '') for a in self.sorted_activities() if a.get('type') in {'BUY', 'SELL'} and a.get('date')})
+            return {'investments': [{'date': day, 'investment': daily.get(day, 0.0)} for day in trade_dates]}
+
+        grouped: dict[str, float] = {}
+        for day, value in daily.items():
+            key = self._group_date(day, group_by)
+            grouped[key] = grouped.get(key, 0.0) + float(value)
 
         first_day, end_day = self._timeline_bounds()
+        if first_day is None or end_day is None:
+            return {'investments': []}
 
-        grouped = defaultdict(float)
-        for day, value in daily.items():
-            grouped[_date_key_for_group(_parse_date(day), group_by)] += value
+        keys: list[str] = []
+        cursor = first_day
+        if group_by == 'month':
+            cursor = cursor.replace(day=1)
+            while cursor <= end_day:
+                keys.append(cursor.isoformat())
+                year = cursor.year + (cursor.month // 12)
+                month = (cursor.month % 12) + 1
+                cursor = cursor.replace(year=year, month=month, day=1)
+        else:
+            cursor = cursor.replace(month=1, day=1)
+            while cursor <= end_day:
+                keys.append(cursor.isoformat())
+                cursor = cursor.replace(year=cursor.year + 1, month=1, day=1)
 
-        all_keys = self._group_interval_keys(first_day, end_day, group_by)
+        return {'investments': [{'date': key, 'investment': grouped.get(key, 0.0)} for key in keys]}
 
-        return {
-            "investments": [
-                {"date": key, "investment": grouped.get(key, 0.0)}
-                for key in all_keys
-            ]
-        }
-
-    def get_holdings(self) -> dict:
+    def get_holdings(self) -> dict[str, Any]:
         states = self._replay_states()
-        return {"holdings": self._build_holdings_from_states(states)}
-
-    def get_details(self, base_currency: str = "USD") -> dict:
-        states = self._replay_states()
-        holdings = self._build_holdings_from_states(states)
-        performance = self._performance_from_states(states)
-
-        return {
-            "accounts": {
-                "default": {
-                    "balance": 0.0,
-                    "currency": base_currency,
-                    "name": "Default Account",
-                    "valueInBaseCurrency": performance["currentValueInBaseCurrency"],
-                }
-            },
-            "createdAt": min((a["date"] for a in self.activities), default=None),
-            "holdings": holdings,
-            "platforms": {
-                "default": {
-                    "balance": 0.0,
-                    "currency": base_currency,
-                    "name": "Default Platform",
-                    "valueInBaseCurrency": performance["currentValueInBaseCurrency"],
-                }
-            },
-            "summary": {
-                "totalInvestment": performance["totalInvestment"],
-                "netPerformance": performance["netPerformance"],
-                "currentValueInBaseCurrency": performance["currentValueInBaseCurrency"],
-                "totalFees": performance["totalFees"],
-            },
-            "hasError": False,
-        }
-
-    def get_dividends(self, group_by: str | None = None) -> dict:
-        dividend_by_day = defaultdict(float)
-        for activity in self.sorted_activities():
-            if activity.get("type") != "DIVIDEND":
+        holdings: dict[str, Any] = {}
+        for symbol, state in states.items():
+            qty = float(state['qty'])
+            if abs(qty) <= self._EPSILON:
                 continue
-            amount = float(activity.get("quantity", 0) or 0) * float(activity.get("unitPrice", 0) or 0)
-            dividend_by_day[activity.get("date", "")] += amount
-
-        if not dividend_by_day:
-            return {"dividends": []}
-
-        if not group_by:
-            return {
-                "dividends": [
-                    {"date": day, "investment": dividend_by_day[day]}
-                    for day in sorted(dividend_by_day)
-                ]
+            market_price = float(self.current_rate_service.get_latest_price(symbol) or 0.0)
+            total_investment = self._symbol_total_investment(state)
+            unrealized, _ = self._symbol_unrealized(symbol, state)
+            net = float(state['realized']) + unrealized - float(state['fees'])
+            denom = total_investment if total_investment > self._EPSILON else float(state['total_buy_cost'])
+            holdings[symbol] = {
+                'symbol': symbol,
+                'quantity': qty,
+                'investment': total_investment,
+                'marketPrice': market_price,
+                'netPerformance': net,
+                'netPerformancePercent': (net / denom) if denom > self._EPSILON else 0.0,
             }
+        return {'holdings': holdings}
 
-        grouped = defaultdict(float)
-        for day, amount in dividend_by_day.items():
-            grouped[_date_key_for_group(_parse_date(day), group_by)] += amount
-
+    def get_details(self, base_currency: str = 'USD') -> dict[str, Any]:
+        perf = self.get_performance()['performance']
+        holdings = self.get_holdings()['holdings']
+        created_at = min((a.get('date') for a in self.activities if a.get('date')), default=None)
         return {
-            "dividends": [
-                {"date": day, "investment": grouped[day]}
-                for day in sorted(grouped)
-            ]
+            'accounts': {
+                'default': {
+                    'balance': 0.0,
+                    'currency': base_currency,
+                    'name': 'Default Account',
+                    'valueInBaseCurrency': perf['currentValueInBaseCurrency'],
+                }
+            },
+            'holdings': holdings,
+            'platforms': {
+                'default': {
+                    'balance': 0.0,
+                    'currency': base_currency,
+                    'name': 'Default Platform',
+                    'valueInBaseCurrency': perf['currentValueInBaseCurrency'],
+                }
+            },
+            'summary': {
+                'totalInvestment': perf['totalInvestment'],
+                'netPerformance': perf['netPerformance'],
+                'currentValueInBaseCurrency': perf['currentValueInBaseCurrency'],
+                'totalFees': perf['totalFees'],
+            },
+            'createdAt': created_at,
+            'hasError': False,
         }
 
-    def getPerformanceCalculationType(self):
-        return "ROAI"
+    def get_dividends(self, group_by: str | None = None) -> dict[str, Any]:
+        totals: dict[str, float] = {}
+        for activity in self.sorted_activities():
+            if activity.get('type') != 'DIVIDEND':
+                continue
+            day = str(activity.get('date', '') or '')
+            if not day:
+                continue
+            key = self._group_date(day, group_by)
+            totals[key] = totals.get(key, 0.0) + self._activity_amount(activity)
+        return {'dividends': [{'date': d, 'investment': totals[d]} for d in sorted(totals)]}
 
-    def evaluate_report(self) -> dict:
-        states = self._replay_states()
-        holdings = self._build_holdings_from_states(states)
-        has_positions = len(holdings) > 0
-
-        categories = [
-            {
-                "key": "accounts",
-                "name": "Accounts",
-                "rules": [
-                    {
-                        "key": "has-positions",
-                        "name": "Portfolio contains positions",
-                        "isActive": has_positions,
-                        "isFulfilled": has_positions,
-                    }
-                ],
-            },
-            {
-                "key": "currencies",
-                "name": "Currencies",
-                "rules": [
-                    {
-                        "key": "base-currency-set",
-                        "name": "Base currency is configured",
-                        "isActive": True,
-                        "isFulfilled": True,
-                    }
-                ],
-            },
-            {
-                "key": "fees",
-                "name": "Fees",
-                "rules": [
-                    {
-                        "key": "fees-tracked",
-                        "name": "Fees are tracked",
-                        "isActive": has_positions,
-                        "isFulfilled": True,
-                    }
-                ],
-            },
-        ]
-
-        all_rules = [rule for category in categories for rule in category["rules"]]
-        active = sum(1 for rule in all_rules if rule.get("isActive"))
-        fulfilled = sum(1 for rule in all_rules if rule.get("isActive") and rule.get("isFulfilled"))
-
+    def evaluate_report(self) -> dict[str, Any]:
+        has_positions = len(self.get_holdings()['holdings']) > 0
+        categories = [{
+            'key': 'accounts',
+            'name': 'Accounts',
+            'rules': [{
+                'key': 'has-positions',
+                'name': 'Portfolio contains positions',
+                'isActive': has_positions,
+                'isFulfilled': has_positions,
+            }],
+        }]
+        active = 1 if has_positions else 0
         return {
-            "xRay": {
-                "categories": categories,
-                "statistics": {
-                    "rulesActiveCount": active,
-                    "rulesFulfilledCount": fulfilled,
+            'xRay': {
+                'categories': categories,
+                'statistics': {
+                    'rulesActiveCount': active,
+                    'rulesFulfilledCount': active,
                 },
             }
         }
+
+    def getPerformanceCalculationType(self) -> str:
+        return "ROAI"
+    def calculateOverallPerformance(self, *args: Any, **kwargs: Any) -> Any:
+        """Auto-generated placeholder from TypeScript method 'calculateOverallPerformance'."""
+        ts_body = [
+            "    let currentValueInBaseCurrency = new Big(0);",
+            "    let grossPerformance = new Big(0);",
+            "    let grossPerformanceWithCurrencyEffect = new Big(0);",
+            "    let hasErrors = false;",
+            "    let netPerformance = new Big(0);",
+            "    let totalFeesWithCurrencyEffect = new Big(0);",
+            "    const totalInterestWithCurrencyEffect = new Big(0);",
+            "    let totalInvestment = new Big(0);",
+            "    let totalInvestmentWithCurrencyEffect = new Big(0);",
+            "    let totalTimeWeightedInvestment = new Big(0);",
+            "    let totalTimeWeightedInvestmentWithCurrencyEffect = new Big(0);",
+            "",
+            "    for (const currentPosition of positions.filter(",
+            "      ({ includeInTotalAssetValue }) => {",
+            "        return includeInTotalAssetValue;",
+            "      }",
+            "    )) {",
+            "      if (currentPosition.feeInBaseCurrency) {",
+            "        totalFeesWithCurrencyEffect = totalFeesWithCurrencyEffect.plus(",
+            "          currentPosition.feeInBaseCurrency",
+            "        );",
+            "      }",
+            "",
+            "      if (currentPosition.valueInBaseCurrency) {",
+            "        currentValueInBaseCurrency = currentValueInBaseCurrency.plus(",
+            "          currentPosition.valueInBaseCurrency",
+            "        );",
+            "      } else {",
+            "        hasErrors = true;",
+            "      }",
+            "",
+            "      if (currentPosition.investment) {",
+            "        totalInvestment = totalInvestment.plus(currentPosition.investment);",
+            "",
+            "        totalInvestmentWithCurrencyEffect =",
+            "          totalInvestmentWithCurrencyEffect.plus(",
+            "            currentPosition.investmentWithCurrencyEffect",
+            "          );",
+            "      } else {",
+            "        hasErrors = true;",
+            "      }",
+            "",
+            "      if (currentPosition.grossPerformance) {",
+            "        grossPerformance = grossPerformance.plus(",
+            "          currentPosition.grossPerformance",
+            "        );",
+            "",
+            "        grossPerformanceWithCurrencyEffect =",
+            "          grossPerformanceWithCurrencyEffect.plus(",
+            "            currentPosition.grossPerformanceWithCurrencyEffect",
+            "          );",
+            "",
+            "        netPerformance = netPerformance.plus(currentPosition.netPerformance);",
+            "      } else if (!currentPosition.quantity.eq(0)) {",
+            "        hasErrors = true;",
+            "      }",
+            "",
+            "      if (currentPosition.timeWeightedInvestment) {",
+            "        totalTimeWeightedInvestment = totalTimeWeightedInvestment.plus(",
+            "          currentPosition.timeWeightedInvestment",
+            "        );",
+            "",
+            "        totalTimeWeightedInvestmentWithCurrencyEffect =",
+            "          totalTimeWeightedInvestmentWithCurrencyEffect.plus(",
+            "            currentPosition.timeWeightedInvestmentWithCurrencyEffect",
+            "          );",
+            "      } else if (!currentPosition.quantity.eq(0)) {",
+            "        Logger.warn(",
+            "          `Missing historical market data for ${currentPosition.symbol} (${currentPosition.dataSource})`,",
+            "          'PortfolioCalculator'",
+            "        );",
+            "",
+            "        hasErrors = true;",
+            "      }",
+            "    }",
+            "",
+            "    return {",
+            "      currentValueInBaseCurrency,",
+            "      hasErrors,",
+            "      positions,",
+            "      totalFeesWithCurrencyEffect,",
+            "      totalInterestWithCurrencyEffect,",
+            "      totalInvestment,",
+            "      totalInvestmentWithCurrencyEffect,",
+            "      activitiesCount: this.activities.filter(({ type }) => {",
+            "        return ['BUY', 'SELL'].includes(type);",
+            "      }).length,",
+            "      createdAt: new Date(),",
+            "      errors: [],",
+            "      historicalData: [],",
+            "      totalLiabilitiesWithCurrencyEffect: new Big(0)",
+            "    };",
+            "",
+        ]
+        _ = ts_body, args, kwargs
+        return None
+
+    def getSymbolMetrics(self, *args: Any, **kwargs: Any) -> Any:
+        """Auto-generated placeholder from TypeScript method 'getSymbolMetrics'."""
+        ts_body = [
+            "    const currentExchangeRate = exchangeRates[format(new Date(), DATE_FORMAT)];",
+            "    const currentValues: { [date: string]: Big } = {};",
+            "    const currentValuesWithCurrencyEffect: { [date: string]: Big } = {};",
+            "    let fees = new Big(0);",
+            "    let feesAtStartDate = new Big(0);",
+            "    let feesAtStartDateWithCurrencyEffect = new Big(0);",
+            "    let feesWithCurrencyEffect = new Big(0);",
+            "    let grossPerformance = new Big(0);",
+            "    let grossPerformanceWithCurrencyEffect = new Big(0);",
+            "    let grossPerformanceAtStartDate = new Big(0);",
+            "    let grossPerformanceAtStartDateWithCurrencyEffect = new Big(0);",
+            "    let grossPerformanceFromSells = new Big(0);",
+            "    let grossPerformanceFromSellsWithCurrencyEffect = new Big(0);",
+            "    let initialValue: Big;",
+            "    let initialValueWithCurrencyEffect: Big;",
+            "    let investmentAtStartDate: Big;",
+            "    let investmentAtStartDateWithCurrencyEffect: Big;",
+            "    const investmentValuesAccumulated: { [date: string]: Big } = {};",
+            "    const investmentValuesAccumulatedWithCurrencyEffect: {",
+            "      [date: string]: Big;",
+            "    } = {};",
+            "    const investmentValuesWithCurrencyEffect: { [date: string]: Big } = {};",
+            "    let lastAveragePrice = new Big(0);",
+            "    let lastAveragePriceWithCurrencyEffect = new Big(0);",
+            "    const netPerformanceValues: { [date: string]: Big } = {};",
+            "    const netPerformanceValuesWithCurrencyEffect: { [date: string]: Big } = {};",
+            "    const timeWeightedInvestmentValues: { [date: string]: Big } = {};",
+            "",
+            "    const timeWeightedInvestmentValuesWithCurrencyEffect: {",
+            "      [date: string]: Big;",
+            "    } = {};",
+            "",
+            "    const totalAccountBalanceInBaseCurrency = new Big(0);",
+            "    let totalDividend = new Big(0);",
+            "    let totalDividendInBaseCurrency = new Big(0);",
+            "    let totalInterest = new Big(0);",
+            "    let totalInterestInBaseCurrency = new Big(0);",
+            "    let totalInvestment = new Big(0);",
+            "    let totalInvestmentFromBuyTransactions = new Big(0);",
+            "    let totalInvestmentFromBuyTransactionsWithCurrencyEffect = new Big(0);",
+            "    let totalInvestmentWithCurrencyEffect = new Big(0);",
+            "    let totalLiabilities = new Big(0);",
+            "    let totalLiabilitiesInBaseCurrency = new Big(0);",
+            "    let totalQuantityFromBuyTransactions = new Big(0);",
+            "    let totalUnits = new Big(0);",
+            "    let valueAtStartDate: Big;",
+            "    let valueAtStartDateWithCurrencyEffect: Big;",
+            "",
+            "    // Clone orders to keep the original values in this.orders",
+            "    let orders: PortfolioOrderItem[] = cloneDeep(",
+            "      this.activities.filter(({ SymbolProfile }) => {",
+            "        return SymbolProfile.symbol === symbol;",
+            "      })",
+            "    );",
+            "",
+            "    const isCash = orders[0]?.SymbolProfile?.assetSubClass === 'CASH';",
+            "",
+            "    if (orders.length <= 0) {",
+            "      return {",
+            "        currentValues: {},",
+            "        currentValuesWithCurrencyEffect: {},",
+            "        feesWithCurrencyEffect: new Big(0),",
+            "        grossPerformance: new Big(0),",
+            "        grossPerformancePercentage: new Big(0),",
+            "        grossPerformancePercentageWithCurrencyEffect: new Big(0),",
+            "        grossPerformanceWithCurrencyEffect: new Big(0),",
+            "        hasErrors: false,",
+            "        initialValue: new Big(0),",
+            "        initialValueWithCurrencyEffect: new Big(0),",
+            "        investmentValuesAccumulated: {},",
+            "        investmentValuesAccumulatedWithCurrencyEffect: {},",
+            "        investmentValuesWithCurrencyEffect: {},",
+            "        netPerformance: new Big(0),",
+            "        netPerformancePercentage: new Big(0),",
+            "        netPerformancePercentageWithCurrencyEffectMap: {},",
+            "        netPerformanceValues: {},",
+            "        netPerformanceValuesWithCurrencyEffect: {},",
+            "        netPerformanceWithCurrencyEffectMap: {},",
+            "        timeWeightedInvestment: new Big(0),",
+            "        timeWeightedInvestmentValues: {},",
+            "        timeWeightedInvestmentValuesWithCurrencyEffect: {},",
+            "        timeWeightedInvestmentWithCurrencyEffect: new Big(0),",
+            "        totalAccountBalanceInBaseCurrency: new Big(0),",
+            "        totalDividend: new Big(0),",
+            "        totalDividendInBaseCurrency: new Big(0),",
+            "        totalInterest: new Big(0),",
+            "        totalInterestInBaseCurrency: new Big(0),",
+            "        totalInvestment: new Big(0),",
+            "        totalInvestmentWithCurrencyEffect: new Big(0),",
+            "        totalLiabilities: new Big(0),",
+            "        totalLiabilitiesInBaseCurrency: new Big(0)",
+            "      };",
+            "    }",
+            "",
+            "    const dateOfFirstTransaction = new Date(orders[0].date);",
+            "",
+            "    const endDateString = format(end, DATE_FORMAT);",
+            "    const startDateString = format(start, DATE_FORMAT);",
+            "",
+            "    const unitPriceAtStartDate = marketSymbolMap[startDateString]?.[symbol];",
+            "    let unitPriceAtEndDate = marketSymbolMap[endDateString]?.[symbol];",
+            "",
+            "    let latestActivity = orders.at(-1);",
+            "",
+            "    if (",
+            "      dataSource === 'MANUAL' &&",
+            "      ['BUY', 'SELL'].includes(latestActivity?.type) &&",
+            "      latestActivity?.unitPrice &&",
+            "      !unitPriceAtEndDate",
+            "    ) {",
+            "      // For BUY / SELL activities with a MANUAL data source where no historical market price is available,",
+            "      // the calculation should fall back to using the activity\u2019s unit price.",
+            "      unitPriceAtEndDate = latestActivity.unitPrice;",
+            "    } else if (isCash) {",
+            "      unitPriceAtEndDate = new Big(1);",
+            "    }",
+            "",
+            "    if (",
+            "      !unitPriceAtEndDate ||",
+            "      (!unitPriceAtStartDate && isBefore(dateOfFirstTransaction, start))",
+            "    ) {",
+            "      return {",
+            "        currentValues: {},",
+            "        currentValuesWithCurrencyEffect: {},",
+            "        feesWithCurrencyEffect: new Big(0),",
+            "        grossPerformance: new Big(0),",
+            "        grossPerformancePercentage: new Big(0),",
+            "        grossPerformancePercentageWithCurrencyEffect: new Big(0),",
+            "        grossPerformanceWithCurrencyEffect: new Big(0),",
+            "        hasErrors: true,",
+            "        initialValue: new Big(0),",
+            "        initialValueWithCurrencyEffect: new Big(0),",
+            "        investmentValuesAccumulated: {},",
+            "        investmentValuesAccumulatedWithCurrencyEffect: {},",
+            "        investmentValuesWithCurrencyEffect: {},",
+            "        netPerformance: new Big(0),",
+            "        netPerformancePercentage: new Big(0),",
+            "        netPerformancePercentageWithCurrencyEffectMap: {},",
+            "        netPerformanceWithCurrencyEffectMap: {},",
+            "        netPerformanceValues: {},",
+            "        netPerformanceValuesWithCurrencyEffect: {},",
+            "        timeWeightedInvestment: new Big(0),",
+            "        timeWeightedInvestmentValues: {},",
+            "        timeWeightedInvestmentValuesWithCurrencyEffect: {},",
+            "        timeWeightedInvestmentWithCurrencyEffect: new Big(0),",
+            "        totalAccountBalanceInBaseCurrency: new Big(0),",
+            "        totalDividend: new Big(0),",
+            "        totalDividendInBaseCurrency: new Big(0),",
+            "        totalInterest: new Big(0),",
+            "        totalInterestInBaseCurrency: new Big(0),",
+            "        totalInvestment: new Big(0),",
+            "        totalInvestmentWithCurrencyEffect: new Big(0),",
+            "        totalLiabilities: new Big(0),",
+            "        totalLiabilitiesInBaseCurrency: new Big(0)",
+            "      };",
+            "    }",
+            "",
+            "    // Add a synthetic order at the start and the end date",
+            "    orders.push({",
+            "      date: startDateString,",
+            "      fee: new Big(0),",
+            "      feeInBaseCurrency: new Big(0),",
+            "      itemType: 'start',",
+            "      quantity: new Big(0),",
+            "      SymbolProfile: {",
+            "        dataSource,",
+            "        symbol,",
+            "        assetSubClass: isCash ? 'CASH' : undefined",
+            "      },",
+            "      type: 'BUY',",
+            "      unitPrice: unitPriceAtStartDate",
+            "    });",
+            "",
+            "    orders.push({",
+            "      date: endDateString,",
+            "      fee: new Big(0),",
+            "      feeInBaseCurrency: new Big(0),",
+            "      itemType: 'end',",
+            "      SymbolProfile: {",
+            "        dataSource,",
+            "        symbol,",
+            "        assetSubClass: isCash ? 'CASH' : undefined",
+            "      },",
+            "      quantity: new Big(0),",
+            "      type: 'BUY',",
+            "      unitPrice: unitPriceAtEndDate",
+            "    });",
+            "",
+            "    let lastUnitPrice: Big;",
+            "",
+            "    const ordersByDate: { [date: string]: PortfolioOrderItem[] } = {};",
+            "",
+            "    for (const order of orders) {",
+            "      ordersByDate[order.date] = ordersByDate[order.date] ?? [];",
+            "      ordersByDate[order.date].push(order);",
+            "    }",
+            "",
+            "    if (!this.chartDates) {",
+            "      this.chartDates = Object.keys(chartDateMap).sort();",
+            "    }",
+            "",
+            "    for (const dateString of this.chartDates) {",
+            "      if (dateString < startDateString) {",
+            "        continue;",
+            "      } else if (dateString > endDateString) {",
+            "        break;",
+            "      }",
+            "",
+            "      if (ordersByDate[dateString]?.length > 0) {",
+            "        for (const order of ordersByDate[dateString]) {",
+            "          order.unitPriceFromMarketData =",
+            "            marketSymbolMap[dateString]?.[symbol] ?? lastUnitPrice;",
+            "        }",
+            "      } else {",
+            "        orders.push({",
+            "          date: dateString,",
+            "          fee: new Big(0),",
+            "          feeInBaseCurrency: new Big(0),",
+            "          quantity: new Big(0),",
+            "          SymbolProfile: {",
+            "            dataSource,",
+            "            symbol,",
+            "            assetSubClass: isCash ? 'CASH' : undefined",
+            "          },",
+            "          type: 'BUY',",
+            "          unitPrice: marketSymbolMap[dateString]?.[symbol] ?? lastUnitPrice,",
+            "          unitPriceFromMarketData:",
+            "            marketSymbolMap[dateString]?.[symbol] ?? lastUnitPrice",
+            "        });",
+            "      }",
+            "",
+            "      latestActivity = orders.at(-1);",
+            "",
+            "      lastUnitPrice =",
+            "        latestActivity.unitPriceFromMarketData ?? latestActivity.unitPrice;",
+            "    }",
+            "",
+            "    // Sort orders so that the start and end placeholder order are at the correct",
+            "    // position",
+            "    orders = sortBy(orders, ({ date, itemType }) => {",
+            "      let sortIndex = new Date(date);",
+            "",
+            "      if (itemType === 'end') {",
+            "        sortIndex = addMilliseconds(sortIndex, 1);",
+            "      } else if (itemType === 'start') {",
+            "        sortIndex = addMilliseconds(sortIndex, -1);",
+            "      }",
+            "",
+            "      return sortIndex.getTime();",
+            "    });",
+            "",
+            "    const indexOfStartOrder = orders.findIndex(({ itemType }) => {",
+            "      return itemType === 'start';",
+            "    });",
+            "",
+            "    const indexOfEndOrder = orders.findIndex(({ itemType }) => {",
+            "      return itemType === 'end';",
+            "    });",
+            "",
+            "    let totalInvestmentDays = 0;",
+            "    let sumOfTimeWeightedInvestments = new Big(0);",
+            "    let sumOfTimeWeightedInvestmentsWithCurrencyEffect = new Big(0);",
+            "",
+            "    for (let i = 0; i < orders.length; i += 1) {",
+            "      const order = orders[i];",
+            "",
+            "      if (PortfolioCalculator.ENABLE_LOGGING) {",
+            "        console.log();",
+            "        console.log();",
+            "        console.log(",
+            "          i + 1,",
+            "          order.date,",
+            "          order.type,",
+            "          order.itemType ? `(${order.itemType})` : ''",
+            "        );",
+            "      }",
+            "",
+            "      const exchangeRateAtOrderDate = exchangeRates[order.date];",
+            "",
+            "      if (order.type === 'DIVIDEND') {",
+            "        const dividend = order.quantity.mul(order.unitPrice);",
+            "",
+            "        totalDividend = totalDividend.plus(dividend);",
+            "        totalDividendInBaseCurrency = totalDividendInBaseCurrency.plus(",
+            "          dividend.mul(exchangeRateAtOrderDate ?? 1)",
+            "        );",
+            "      } else if (order.type === 'INTEREST') {",
+            "        const interest = order.quantity.mul(order.unitPrice);",
+            "",
+            "        totalInterest = totalInterest.plus(interest);",
+            "        totalInterestInBaseCurrency = totalInterestInBaseCurrency.plus(",
+            "          interest.mul(exchangeRateAtOrderDate ?? 1)",
+            "        );",
+            "      } else if (order.type === 'LIABILITY') {",
+            "        const liabilities = order.quantity.mul(order.unitPrice);",
+            "",
+            "        totalLiabilities = totalLiabilities.plus(liabilities);",
+            "        totalLiabilitiesInBaseCurrency = totalLiabilitiesInBaseCurrency.plus(",
+            "          liabilities.mul(exchangeRateAtOrderDate ?? 1)",
+            "        );",
+            "      }",
+            "",
+            "      if (order.itemType === 'start') {",
+            "        // Take the unit price of the order as the market price if there are no",
+            "        // orders of this symbol before the start date",
+            "        order.unitPrice =",
+            "          indexOfStartOrder === 0",
+            "            ? orders[i + 1]?.unitPrice",
+            "            : unitPriceAtStartDate;",
+            "      }",
+            "",
+            "      if (order.fee) {",
+            "        order.feeInBaseCurrency = order.fee.mul(currentExchangeRate ?? 1);",
+            "        order.feeInBaseCurrencyWithCurrencyEffect = order.fee.mul(",
+            "          exchangeRateAtOrderDate ?? 1",
+            "        );",
+            "      }",
+            "",
+            "      const unitPrice = ['BUY', 'SELL'].includes(order.type)",
+            "        ? order.unitPrice",
+            "        : order.unitPriceFromMarketData;",
+            "",
+            "      if (unitPrice) {",
+            "        order.unitPriceInBaseCurrency = unitPrice.mul(currentExchangeRate ?? 1);",
+            "",
+            "        order.unitPriceInBaseCurrencyWithCurrencyEffect = unitPrice.mul(",
+            "          exchangeRateAtOrderDate ?? 1",
+            "        );",
+            "      }",
+            "",
+            "      const marketPriceInBaseCurrency =",
+            "        order.unitPriceFromMarketData?.mul(currentExchangeRate ?? 1) ??",
+            "        new Big(0);",
+            "      const marketPriceInBaseCurrencyWithCurrencyEffect =",
+            "        order.unitPriceFromMarketData?.mul(exchangeRateAtOrderDate ?? 1) ??",
+            "        new Big(0);",
+            "",
+            "      const valueOfInvestmentBeforeTransaction = totalUnits.mul(",
+            "        marketPriceInBaseCurrency",
+            "      );",
+            "",
+            "      const valueOfInvestmentBeforeTransactionWithCurrencyEffect =",
+            "        totalUnits.mul(marketPriceInBaseCurrencyWithCurrencyEffect);",
+            "",
+            "      if (!investmentAtStartDate && i >= indexOfStartOrder) {",
+            "        investmentAtStartDate = totalInvestment ?? new Big(0);",
+            "",
+            "        investmentAtStartDateWithCurrencyEffect =",
+            "          totalInvestmentWithCurrencyEffect ?? new Big(0);",
+            "",
+            "        valueAtStartDate = valueOfInvestmentBeforeTransaction;",
+            "",
+            "        valueAtStartDateWithCurrencyEffect =",
+            "          valueOfInvestmentBeforeTransactionWithCurrencyEffect;",
+            "      }",
+            "",
+            "      let transactionInvestment = new Big(0);",
+            "      let transactionInvestmentWithCurrencyEffect = new Big(0);",
+            "",
+            "      if (order.type === 'BUY') {",
+            "        transactionInvestment = order.quantity",
+            "          .mul(order.unitPriceInBaseCurrency)",
+            "          .mul(getFactor(order.type));",
+            "",
+            "        transactionInvestmentWithCurrencyEffect = order.quantity",
+            "          .mul(order.unitPriceInBaseCurrencyWithCurrencyEffect)",
+            "          .mul(getFactor(order.type));",
+            "",
+            "        totalQuantityFromBuyTransactions =",
+            "          totalQuantityFromBuyTransactions.plus(order.quantity);",
+            "",
+            "        totalInvestmentFromBuyTransactions =",
+            "          totalInvestmentFromBuyTransactions.plus(transactionInvestment);",
+            "",
+            "        totalInvestmentFromBuyTransactionsWithCurrencyEffect =",
+            "          totalInvestmentFromBuyTransactionsWithCurrencyEffect.plus(",
+            "            transactionInvestmentWithCurrencyEffect",
+            "          );",
+            "      } else if (order.type === 'SELL') {",
+            "        if (totalUnits.gt(0)) {",
+            "          transactionInvestment = totalInvestment",
+            "            .div(totalUnits)",
+            "            .mul(order.quantity)",
+            "            .mul(getFactor(order.type));",
+            "          transactionInvestmentWithCurrencyEffect =",
+            "            totalInvestmentWithCurrencyEffect",
+            "              .div(totalUnits)",
+            "              .mul(order.quantity)",
+            "              .mul(getFactor(order.type));",
+            "        }",
+            "      }",
+            "",
+            "      if (PortfolioCalculator.ENABLE_LOGGING) {",
+            "        console.log('order.quantity', order.quantity.toNumber());",
+            "        console.log('transactionInvestment', transactionInvestment.toNumber());",
+            "",
+            "        console.log(",
+            "          'transactionInvestmentWithCurrencyEffect',",
+            "          transactionInvestmentWithCurrencyEffect.toNumber()",
+            "        );",
+            "      }",
+            "",
+            "      const totalInvestmentBeforeTransaction = totalInvestment;",
+            "",
+            "      const totalInvestmentBeforeTransactionWithCurrencyEffect =",
+            "        totalInvestmentWithCurrencyEffect;",
+            "",
+            "      totalInvestment = totalInvestment.plus(transactionInvestment);",
+            "",
+            "      totalInvestmentWithCurrencyEffect =",
+            "        totalInvestmentWithCurrencyEffect.plus(",
+            "          transactionInvestmentWithCurrencyEffect",
+            "        );",
+            "",
+            "      if (i >= indexOfStartOrder && !initialValue) {",
+            "        if (",
+            "          i === indexOfStartOrder &&",
+            "          !valueOfInvestmentBeforeTransaction.eq(0)",
+            "        ) {",
+            "          initialValue = valueOfInvestmentBeforeTransaction;",
+            "",
+            "          initialValueWithCurrencyEffect =",
+            "            valueOfInvestmentBeforeTransactionWithCurrencyEffect;",
+            "        } else if (transactionInvestment.gt(0)) {",
+            "          initialValue = transactionInvestment;",
+            "",
+            "          initialValueWithCurrencyEffect =",
+            "            transactionInvestmentWithCurrencyEffect;",
+            "        }",
+            "      }",
+            "",
+            "      fees = fees.plus(order.feeInBaseCurrency ?? 0);",
+            "",
+            "      feesWithCurrencyEffect = feesWithCurrencyEffect.plus(",
+            "        order.feeInBaseCurrencyWithCurrencyEffect ?? 0",
+            "      );",
+            "",
+            "      totalUnits = totalUnits.plus(order.quantity.mul(getFactor(order.type)));",
+            "",
+            "      const valueOfInvestment = totalUnits.mul(marketPriceInBaseCurrency);",
+            "",
+            "      const valueOfInvestmentWithCurrencyEffect = totalUnits.mul(",
+            "        marketPriceInBaseCurrencyWithCurrencyEffect",
+            "      );",
+            "",
+            "      const grossPerformanceFromSell =",
+            "        order.type === 'SELL'",
+            "          ? order.unitPriceInBaseCurrency",
+            "              .minus(lastAveragePrice)",
+            "              .mul(order.quantity)",
+            "          : new Big(0);",
+            "",
+            "      const grossPerformanceFromSellWithCurrencyEffect =",
+            "        order.type === 'SELL'",
+            "          ? order.unitPriceInBaseCurrencyWithCurrencyEffect",
+            "              .minus(lastAveragePriceWithCurrencyEffect)",
+            "              .mul(order.quantity)",
+            "          : new Big(0);",
+            "",
+            "      grossPerformanceFromSells = grossPerformanceFromSells.plus(",
+            "        grossPerformanceFromSell",
+            "      );",
+            "",
+            "      grossPerformanceFromSellsWithCurrencyEffect =",
+            "        grossPerformanceFromSellsWithCurrencyEffect.plus(",
+            "          grossPerformanceFromSellWithCurrencyEffect",
+            "        );",
+            "",
+            "      lastAveragePrice = totalQuantityFromBuyTransactions.eq(0)",
+            "        ? new Big(0)",
+            "        : totalInvestmentFromBuyTransactions.div(",
+            "            totalQuantityFromBuyTransactions",
+            "          );",
+            "",
+            "      lastAveragePriceWithCurrencyEffect = totalQuantityFromBuyTransactions.eq(",
+            "        0",
+            "      )",
+            "        ? new Big(0)",
+            "        : totalInvestmentFromBuyTransactionsWithCurrencyEffect.div(",
+            "            totalQuantityFromBuyTransactions",
+            "          );",
+            "",
+            "      if (totalUnits.eq(0)) {",
+            "        // Reset tracking variables when position is fully closed",
+            "        totalInvestmentFromBuyTransactions = new Big(0);",
+            "        totalInvestmentFromBuyTransactionsWithCurrencyEffect = new Big(0);",
+            "        totalQuantityFromBuyTransactions = new Big(0);",
+            "      }",
+            "",
+            "      if (PortfolioCalculator.ENABLE_LOGGING) {",
+            "        console.log(",
+            "          'grossPerformanceFromSells',",
+            "          grossPerformanceFromSells.toNumber()",
+            "        );",
+            "        console.log(",
+            "          'grossPerformanceFromSellWithCurrencyEffect',",
+            "          grossPerformanceFromSellWithCurrencyEffect.toNumber()",
+            "        );",
+            "      }",
+            "",
+            "      const newGrossPerformance = valueOfInvestment",
+            "        .minus(totalInvestment)",
+            "        .plus(grossPerformanceFromSells);",
+            "",
+            "      const newGrossPerformanceWithCurrencyEffect =",
+            "        valueOfInvestmentWithCurrencyEffect",
+            "          .minus(totalInvestmentWithCurrencyEffect)",
+            "          .plus(grossPerformanceFromSellsWithCurrencyEffect);",
+            "",
+            "      grossPerformance = newGrossPerformance;",
+            "",
+            "      grossPerformanceWithCurrencyEffect =",
+            "        newGrossPerformanceWithCurrencyEffect;",
+            "",
+            "      if (order.itemType === 'start') {",
+            "        feesAtStartDate = fees;",
+            "        feesAtStartDateWithCurrencyEffect = feesWithCurrencyEffect;",
+            "        grossPerformanceAtStartDate = grossPerformance;",
+            "",
+            "        grossPerformanceAtStartDateWithCurrencyEffect =",
+            "          grossPerformanceWithCurrencyEffect;",
+            "      }",
+            "",
+            "      if (i > indexOfStartOrder) {",
+            "        // Only consider periods with an investment for the calculation of",
+            "        // the time weighted investment",
+            "        if (",
+            "          valueOfInvestmentBeforeTransaction.gt(0) &&",
+            "          ['BUY', 'SELL'].includes(order.type)",
+            "        ) {",
+            "          // Calculate the number of days since the previous order",
+            "          const orderDate = new Date(order.date);",
+            "          const previousOrderDate = new Date(orders[i - 1].date);",
+            "",
+            "          let daysSinceLastOrder = differenceInDays(",
+            "            orderDate,",
+            "            previousOrderDate",
+            "          );",
+            "          if (daysSinceLastOrder <= 0) {",
+            "            // The time between two activities on the same day is unknown",
+            "            // -> Set it to the smallest floating point number greater than 0",
+            "            daysSinceLastOrder = Number.EPSILON;",
+            "          }",
+            "",
+            "          // Sum up the total investment days since the start date to calculate",
+            "          // the time weighted investment",
+            "          totalInvestmentDays += daysSinceLastOrder;",
+            "",
+            "          sumOfTimeWeightedInvestments = sumOfTimeWeightedInvestments.add(",
+            "            valueAtStartDate",
+            "              .minus(investmentAtStartDate)",
+            "              .plus(totalInvestmentBeforeTransaction)",
+            "              .mul(daysSinceLastOrder)",
+            "          );",
+            "",
+            "          sumOfTimeWeightedInvestmentsWithCurrencyEffect =",
+            "            sumOfTimeWeightedInvestmentsWithCurrencyEffect.add(",
+            "              valueAtStartDateWithCurrencyEffect",
+            "                .minus(investmentAtStartDateWithCurrencyEffect)",
+            "                .plus(totalInvestmentBeforeTransactionWithCurrencyEffect)",
+            "                .mul(daysSinceLastOrder)",
+            "            );",
+            "        }",
+            "",
+            "        currentValues[order.date] = valueOfInvestment;",
+            "",
+            "        currentValuesWithCurrencyEffect[order.date] =",
+            "          valueOfInvestmentWithCurrencyEffect;",
+            "",
+            "        netPerformanceValues[order.date] = grossPerformance",
+            "          .minus(grossPerformanceAtStartDate)",
+            "          .minus(fees.minus(feesAtStartDate));",
+            "",
+            "        netPerformanceValuesWithCurrencyEffect[order.date] =",
+            "          grossPerformanceWithCurrencyEffect",
+            "            .minus(grossPerformanceAtStartDateWithCurrencyEffect)",
+            "            .minus(",
+            "              feesWithCurrencyEffect.minus(feesAtStartDateWithCurrencyEffect)",
+            "            );",
+            "",
+            "        investmentValuesAccumulated[order.date] = totalInvestment;",
+            "",
+            "        investmentValuesAccumulatedWithCurrencyEffect[order.date] =",
+            "          totalInvestmentWithCurrencyEffect;",
+            "",
+            "        investmentValuesWithCurrencyEffect[order.date] = (",
+            "          investmentValuesWithCurrencyEffect[order.date] ?? new Big(0)",
+            "        ).add(transactionInvestmentWithCurrencyEffect);",
+            "",
+            "        // If duration is effectively zero (first day), use the actual investment as the base.",
+            "        // Otherwise, use the calculated time-weighted average.",
+            "        timeWeightedInvestmentValues[order.date] =",
+            "          totalInvestmentDays > Number.EPSILON",
+            "            ? sumOfTimeWeightedInvestments.div(totalInvestmentDays)",
+            "            : totalInvestment.gt(0)",
+            "              ? totalInvestment",
+            "              : new Big(0);",
+            "",
+            "        timeWeightedInvestmentValuesWithCurrencyEffect[order.date] =",
+            "          totalInvestmentDays > Number.EPSILON",
+            "            ? sumOfTimeWeightedInvestmentsWithCurrencyEffect.div(",
+            "                totalInvestmentDays",
+            "              )",
+            "            : totalInvestmentWithCurrencyEffect.gt(0)",
+            "              ? totalInvestmentWithCurrencyEffect",
+            "              : new Big(0);",
+            "      }",
+            "",
+            "      if (PortfolioCalculator.ENABLE_LOGGING) {",
+            "        console.log('totalInvestment', totalInvestment.toNumber());",
+            "",
+            "        console.log(",
+            "          'totalInvestmentWithCurrencyEffect',",
+            "          totalInvestmentWithCurrencyEffect.toNumber()",
+            "        );",
+            "",
+            "        console.log(",
+            "          'totalGrossPerformance',",
+            "          grossPerformance.minus(grossPerformanceAtStartDate).toNumber()",
+            "        );",
+            "",
+            "        console.log(",
+            "          'totalGrossPerformanceWithCurrencyEffect',",
+            "          grossPerformanceWithCurrencyEffect",
+            "            .minus(grossPerformanceAtStartDateWithCurrencyEffect)",
+            "            .toNumber()",
+            "        );",
+            "      }",
+            "",
+            "      if (i === indexOfEndOrder) {",
+            "        break;",
+            "      }",
+            "    }",
+            "",
+            "    const totalGrossPerformance = grossPerformance.minus(",
+            "      grossPerformanceAtStartDate",
+            "    );",
+            "",
+            "    const totalGrossPerformanceWithCurrencyEffect =",
+            "      grossPerformanceWithCurrencyEffect.minus(",
+            "        grossPerformanceAtStartDateWithCurrencyEffect",
+            "      );",
+            "",
+            "    const totalNetPerformance = grossPerformance",
+            "      .minus(grossPerformanceAtStartDate)",
+            "      .minus(fees.minus(feesAtStartDate));",
+            "",
+            "    const timeWeightedAverageInvestmentBetweenStartAndEndDate =",
+            "      totalInvestmentDays > 0",
+            "        ? sumOfTimeWeightedInvestments.div(totalInvestmentDays)",
+            "        : new Big(0);",
+            "",
+            "    const timeWeightedAverageInvestmentBetweenStartAndEndDateWithCurrencyEffect =",
+            "      totalInvestmentDays > 0",
+            "        ? sumOfTimeWeightedInvestmentsWithCurrencyEffect.div(",
+            "            totalInvestmentDays",
+            "          )",
+            "        : new Big(0);",
+            "",
+            "    const grossPerformancePercentage =",
+            "      timeWeightedAverageInvestmentBetweenStartAndEndDate.gt(0)",
+            "        ? totalGrossPerformance.div(",
+            "            timeWeightedAverageInvestmentBetweenStartAndEndDate",
+            "          )",
+            "        : new Big(0);",
+            "",
+            "    const grossPerformancePercentageWithCurrencyEffect =",
+            "      timeWeightedAverageInvestmentBetweenStartAndEndDateWithCurrencyEffect.gt(",
+            "        0",
+            "      )",
+            "        ? totalGrossPerformanceWithCurrencyEffect.div(",
+            "            timeWeightedAverageInvestmentBetweenStartAndEndDateWithCurrencyEffect",
+            "          )",
+            "        : new Big(0);",
+            "",
+            "    const feesPerUnit = totalUnits.gt(0)",
+            "      ? fees.minus(feesAtStartDate).div(totalUnits)",
+            "      : new Big(0);",
+            "",
+            "    const feesPerUnitWithCurrencyEffect = totalUnits.gt(0)",
+            "      ? feesWithCurrencyEffect",
+            "          .minus(feesAtStartDateWithCurrencyEffect)",
+            "          .div(totalUnits)",
+            "      : new Big(0);",
+            "",
+            "    const netPerformancePercentage =",
+            "      timeWeightedAverageInvestmentBetweenStartAndEndDate.gt(0)",
+            "        ? totalNetPerformance.div(",
+            "            timeWeightedAverageInvestmentBetweenStartAndEndDate",
+            "          )",
+            "        : new Big(0);",
+            "",
+            "    const netPerformancePercentageWithCurrencyEffectMap: {",
+            "      [key: DateRange]: Big;",
+            "    } = {};",
+            "",
+            "    const netPerformanceWithCurrencyEffectMap: {",
+            "      [key: DateRange]: Big;",
+            "    } = {};",
+            "",
+            "    for (const dateRange of [",
+            "      '1d',",
+            "      '1y',",
+            "      '5y',",
+            "      'max',",
+            "      'mtd',",
+            "      'wtd',",
+            "      'ytd',",
+            "      ...eachYearOfInterval({ end, start })",
+            "        .filter((date) => {",
+            "          return !isThisYear(date);",
+            "        })",
+            "        .map((date) => {",
+            "          return format(date, 'yyyy');",
+            "        })",
+            "    ] as DateRange[]) {",
+            "      const dateInterval = getIntervalFromDateRange(dateRange);",
+            "      const endDate = dateInterval.endDate;",
+            "      let startDate = dateInterval.startDate;",
+            "",
+            "      if (isBefore(startDate, start)) {",
+            "        startDate = start;",
+            "      }",
+            "",
+            "      const rangeEndDateString = format(endDate, DATE_FORMAT);",
+            "      const rangeStartDateString = format(startDate, DATE_FORMAT);",
+            "",
+            "      const currentValuesAtDateRangeStartWithCurrencyEffect =",
+            "        currentValuesWithCurrencyEffect[rangeStartDateString] ?? new Big(0);",
+            "",
+            "      const investmentValuesAccumulatedAtStartDateWithCurrencyEffect =",
+            "        investmentValuesAccumulatedWithCurrencyEffect[rangeStartDateString] ??",
+            "        new Big(0);",
+            "",
+            "      const grossPerformanceAtDateRangeStartWithCurrencyEffect =",
+            "        currentValuesAtDateRangeStartWithCurrencyEffect.minus(",
+            "          investmentValuesAccumulatedAtStartDateWithCurrencyEffect",
+            "        );",
+            "",
+            "      let average = new Big(0);",
+            "      let dayCount = 0;",
+            "",
+            "      for (let i = this.chartDates.length - 1; i >= 0; i -= 1) {",
+            "        const date = this.chartDates[i];",
+            "",
+            "        if (date > rangeEndDateString) {",
+            "          continue;",
+            "        } else if (date < rangeStartDateString) {",
+            "          break;",
+            "        }",
+            "",
+            "        if (",
+            "          investmentValuesAccumulatedWithCurrencyEffect[date] instanceof Big &&",
+            "          investmentValuesAccumulatedWithCurrencyEffect[date].gt(0)",
+            "        ) {",
+            "          average = average.add(",
+            "            investmentValuesAccumulatedWithCurrencyEffect[date].add(",
+            "              grossPerformanceAtDateRangeStartWithCurrencyEffect",
+            "            )",
+            "          );",
+            "",
+            "          dayCount++;",
+            "        }",
+            "      }",
+            "",
+            "      if (dayCount > 0) {",
+            "        average = average.div(dayCount);",
+            "      }",
+            "",
+            "      netPerformanceWithCurrencyEffectMap[dateRange] =",
+            "        netPerformanceValuesWithCurrencyEffect[rangeEndDateString]?.minus(",
+            "          // If the date range is 'max', take 0 as a start value. Otherwise,",
+            "          // the value of the end of the day of the start date is taken which",
+            "          // differs from the buying price.",
+            "          dateRange === 'max'",
+            "            ? new Big(0)",
+            "            : (netPerformanceValuesWithCurrencyEffect[rangeStartDateString] ??",
+            "                new Big(0))",
+            "        ) ?? new Big(0);",
+            "",
+            "      netPerformancePercentageWithCurrencyEffectMap[dateRange] = average.gt(0)",
+            "        ? netPerformanceWithCurrencyEffectMap[dateRange].div(average)",
+            "        : new Big(0);",
+            "    }",
+            "",
+            "    if (PortfolioCalculator.ENABLE_LOGGING) {",
+            "      console.log(",
+            "        `",
+            "        ${symbol}",
+            "        Unit price: ${orders[indexOfStartOrder].unitPrice.toFixed(",
+            "          2",
+            "        )} -> ${unitPriceAtEndDate.toFixed(2)}",
+            "        Total investment: ${totalInvestment.toFixed(2)}",
+            "        Total investment with currency effect: ${totalInvestmentWithCurrencyEffect.toFixed(",
+            "          2",
+            "        )}",
+            "        Time weighted investment: ${timeWeightedAverageInvestmentBetweenStartAndEndDate.toFixed(",
+            "          2",
+            "        )}",
+            "        Time weighted investment with currency effect: ${timeWeightedAverageInvestmentBetweenStartAndEndDateWithCurrencyEffect.toFixed(",
+            "          2",
+            "        )}",
+            "        Total dividend: ${totalDividend.toFixed(2)}",
+            "        Gross performance: ${totalGrossPerformance.toFixed(",
+            "          2",
+            "        )} / ${grossPerformancePercentage.mul(100).toFixed(2)}%",
+            "        Gross performance with currency effect: ${totalGrossPerformanceWithCurrencyEffect.toFixed(",
+            "          2",
+            "        )} / ${grossPerformancePercentageWithCurrencyEffect",
+            "          .mul(100)",
+            "          .toFixed(2)}%",
+            "        Fees per unit: ${feesPerUnit.toFixed(2)}",
+            "        Fees per unit with currency effect: ${feesPerUnitWithCurrencyEffect.toFixed(",
+            "          2",
+            "        )}",
+            "        Net performance: ${totalNetPerformance.toFixed(",
+            "          2",
+            "        )} / ${netPerformancePercentage.mul(100).toFixed(2)}%",
+            "        Net performance with currency effect: ${netPerformancePercentageWithCurrencyEffectMap[",
+            "          'max'",
+            "        ].toFixed(2)}%`",
+            "      );",
+            "    }",
+            "",
+            "    return {",
+            "      currentValues,",
+            "      currentValuesWithCurrencyEffect,",
+            "      feesWithCurrencyEffect,",
+            "      grossPerformancePercentage,",
+            "      grossPerformancePercentageWithCurrencyEffect,",
+            "      initialValue,",
+            "      initialValueWithCurrencyEffect,",
+            "      investmentValuesAccumulated,",
+            "      investmentValuesAccumulatedWithCurrencyEffect,",
+            "      investmentValuesWithCurrencyEffect,",
+            "      netPerformancePercentage,",
+            "      netPerformancePercentageWithCurrencyEffectMap,",
+            "      netPerformanceValues,",
+            "      netPerformanceValuesWithCurrencyEffect,",
+            "      netPerformanceWithCurrencyEffectMap,",
+            "      timeWeightedInvestmentValues,",
+            "      timeWeightedInvestmentValuesWithCurrencyEffect,",
+            "      totalAccountBalanceInBaseCurrency,",
+            "      totalDividend,",
+            "      totalDividendInBaseCurrency,",
+            "      totalInterest,",
+            "      totalInterestInBaseCurrency,",
+            "      totalInvestment,",
+            "      totalInvestmentWithCurrencyEffect,",
+            "      totalLiabilities,",
+            "      totalLiabilitiesInBaseCurrency,",
+            "      grossPerformance: totalGrossPerformance,",
+            "      grossPerformanceWithCurrencyEffect:",
+            "        totalGrossPerformanceWithCurrencyEffect,",
+            "      hasErrors: totalUnits.gt(0) && (!initialValue || !unitPriceAtEndDate),",
+            "      netPerformance: totalNetPerformance,",
+            "      timeWeightedInvestment:",
+            "        timeWeightedAverageInvestmentBetweenStartAndEndDate,",
+            "      timeWeightedInvestmentWithCurrencyEffect:",
+            "        timeWeightedAverageInvestmentBetweenStartAndEndDateWithCurrencyEffect",
+            "    };",
+            "",
+        ]
+        _ = ts_body, args, kwargs
+        return None

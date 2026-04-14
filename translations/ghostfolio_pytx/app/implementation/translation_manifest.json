@@ -1,0 +1,30 @@
+{
+  "generated_at": "2026-04-14T16:25:08.031936+00:00",
+  "label": "ghostfolio-roai",
+  "source": {
+    "path": "/Users/sondre/Programmering/hackathon-tt-py-slop-or-bust/projects/ghostfolio/apps/api/src/app/portfolio/calculator/roai/portfolio-calculator.ts",
+    "digest": "4bd49d3d0b220a20fd4535dfb56a59551c403b5c7ac28695ed3c010cf25ff56a",
+    "class_name": "RoaiPortfolioCalculator",
+    "base_name": "PortfolioCalculator",
+    "method_names": [
+      "calculateOverallPerformance",
+      "getPerformanceCalculationType",
+      "getSymbolMetrics"
+    ],
+    "import_paths": [
+      "@ghostfolio/api/app/portfolio/calculator/portfolio-calculator",
+      "@ghostfolio/api/app/portfolio/interfaces/portfolio-order-item.interface",
+      "@ghostfolio/api/helper/portfolio.helper",
+      "@ghostfolio/common/calculation-helper",
+      "@ghostfolio/common/helper",
+      "@ghostfolio/common/models",
+      "@ghostfolio/common/types",
+      "@ghostfolio/common/types/performance-calculation-type.type",
+      "@nestjs/common",
+      "big.js",
+      "lodash"
+    ],
+    "calc_kind": "ROAI",
+    "method_count": 3
+  }
+}
