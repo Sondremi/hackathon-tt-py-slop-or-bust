@@ -252,7 +252,7 @@ def _tokens(c):
 
 def _nullish_and_arrows(c):
     """Convert nullish coalescing, optional chaining, arrow fns."""
-    c = re.sub(r'(\w+(?:\[[\w"\'\[\]]+\])*(?:\.\w+)*)\s*\?\?\s*(\S+)',
+    c = re.sub(r'(\w+(?:\.\w+)*)\s*\?\?\s*(\S+)',
                r'(\1 if \1 is not None else \2)', c)
     c = re.sub(r'(\w+)\?\.\[', r'\1[', c)
     c = re.sub(r'(\w+)\?\.(\w+)', r'(getattr(\1,"\2",None) if \1 else None)', c)
