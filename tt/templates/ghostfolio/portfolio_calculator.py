@@ -463,7 +463,7 @@ class RoaiPortfolioCalculator(PortfolioCalculator):
         }
 
     def getPerformanceCalculationType(self):
-        return "ROAI"
+        return "__CALC_TYPE__"
 
     def evaluate_report(self) -> dict:
         states = self._replay_states()

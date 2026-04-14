@@ -1,0 +1,11 @@
+{
+  "targets": [
+    {
+      "label": "ghostfolio-roai",
+      "source": "projects/ghostfolio/apps/api/src/app/portfolio/calculator/roai/portfolio-calculator.ts",
+      "runtime_template": "tt/templates/ghostfolio/portfolio_calculator.py",
+      "output": "app/implementation/portfolio/calculator/roai/portfolio_calculator.py",
+      "manifest": "app/implementation/translation_manifest.json"
+    }
+  ]
+}
