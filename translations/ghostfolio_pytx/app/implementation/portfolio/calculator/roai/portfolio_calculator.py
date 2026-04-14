@@ -7,7 +7,6 @@ from app.wrapper.portfolio.calculator.portfolio_calculator import PortfolioCalcu
 
 
 class RoaiPortfolioCalculator(_Base):
-    pass  # translated from TS source
 
     def calculate_overall_performance(self):
         currentValueInBaseCurrency = float(0)
@@ -29,7 +28,7 @@ class RoaiPortfolioCalculator(_Base):
 
     def get_symbol_metrics(self):
         currentExchangeRate = exchangeRates[_fmt(_now())]
-        fees = float(0)
+        currentValues = currentValuesWithCurrencyEffect = fees = float(0)
         feesAtStartDate = float(0)
         feesAtStartDateWithCurrencyEffect = float(0)
         feesWithCurrencyEffect = float(0)
@@ -43,16 +42,9 @@ class RoaiPortfolioCalculator(_Base):
 
     def compute_transaction_points(self):
         self.transactionPoints = []
-        lastDate = None
+        symbols = lastDate = None
         lastTransactionPoint = None
-        date,
-        fee,
-        feeInBaseCurrency,
-        quantity,
-        SymbolProfile,
-        tags,
-        type,
-        unitPrice
+        date, fee, feeInBaseCurrency, quantity, SymbolProfile, tags, type, unitPrice
         assetSubClass = SymbolProfile.assetSubClass
         currency = SymbolProfile.currency
         dataSource = SymbolProfile.dataSource
@@ -62,7 +54,7 @@ class RoaiPortfolioCalculator(_Base):
 
 
     def get_performance(self):
-        await self.snapshotPromise
+        self.snapshotPromise
         historicalData = self.snapshot.historicalData
         chart = []
         totalInvestmentValuesWithCurrencyEffect = []
@@ -73,7 +65,6 @@ class RoaiPortfolioCalculator(_Base):
 
 
     def get_investments_by_group(self):
-        investmentValueWithCurrencyEffect
         return list(groupedData.keys())
 
 
@@ -81,42 +72,35 @@ class RoaiPortfolioCalculator(_Base):
         startTimeTotal = performance.now()
         isCachedPortfolioSnapshotExpired = False
         jobId = self.userId
-        self.redisCacheService.getPortfolioSnapshotKey(_item)
-        JSON.parse(cachedPortfolioSnapshotValue)
-        PortfolioSnapshot,
-        portfolioSnapshot
 
 
     def get_start_date(self):
         firstAccountBalanceDate = (_dt(firstAccountBalanceDateString) if firstAccountBalanceDateString else _now())
-        catch (error)
         firstAccountBalanceDate = _now()
         firstActivityDateString = self.transactionPoints[0].date
         firstActivityDate = (_dt(firstActivityDateString) if firstActivityDateString else _now())
-        catch (error)
         firstActivityDate = _now()
         return min([firstAccountBalanceDate, firstActivityDate])
 
 
     def get_dividend_in_base_currency(self):
-        await self.snapshotPromise
-        return getSum(
-        self.snapshot.positions
+        self.snapshotPromise
+        return getSum( self.snapshot.positions
         )
 
 
     def get_fees_in_base_currency(self):
-        await self.snapshotPromise
+        self.snapshotPromise
         return self.snapshot.totalFeesWithCurrencyEffect
 
 
     def get_interest_in_base_currency(self):
-        await self.snapshotPromise
+        self.snapshotPromise
         return self.snapshot.totalInterestWithCurrencyEffect
 
 
     def get_liabilities_in_base_currency(self):
-        await self.snapshotPromise
+        self.snapshotPromise
         return self.snapshot.totalLiabilitiesWithCurrencyEffect
 
 
@@ -125,7 +109,7 @@ class RoaiPortfolioCalculator(_Base):
 
 
     def get_snapshot(self):
-        await self.snapshotPromise
+        self.snapshotPromise
         return self.snapshot
 
 
