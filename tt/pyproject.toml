@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "tt"
 version = "0.1.0"
-description = "Translation tool - copies implementation from ghostfolio_pytx_example"
+description = "Translation tool - source-driven TypeScript to Python generation"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.115",

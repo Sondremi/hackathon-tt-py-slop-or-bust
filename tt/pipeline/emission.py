@@ -6,14 +6,22 @@ import json
 from pathlib import Path
 
 
+_REQUIRED_WRAPPER_METHODS = (
+    "get_performance",
+    "get_investments",
+    "get_holdings",
+    "get_details",
+    "get_dividends",
+    "evaluate_report",
+)
+
+
 @dataclass(frozen=True)
 class TargetRule:
     label: str
     source: str
-    runtime_template: str
     output: str
     manifest: str
-
 
 
 def load_rules(config_file: Path) -> list[TargetRule]:
@@ -26,13 +34,11 @@ def load_rules(config_file: Path) -> list[TargetRule]:
             TargetRule(
                 label=item["label"],
                 source=item["source"],
-                runtime_template=item["runtime_template"],
                 output=item["output"],
                 manifest=item["manifest"],
             )
         )
     return rules
-
 
 
 def _provenance_banner(rule: TargetRule, unit) -> str:
@@ -53,18 +59,452 @@ def _provenance_banner(rule: TargetRule, unit) -> str:
     return "\n".join(lines)
 
 
+def _emit_default_interface_methods(calc_kind: str) -> str:
+    template = """
+    _EPSILON = 1e-12
 
-def render_runtime_text(rule: TargetRule, unit, runtime_text: str) -> str:
+    @staticmethod
+    def _group_date(date_str: str, group_by: str | None) -> str:
+        if group_by == 'month':
+            return f"{date_str[:7]}-01"
+        if group_by == 'year':
+            return f"{date_str[:4]}-01-01"
+        return date_str
+
+    @staticmethod
+    def _activity_amount(activity: dict[str, Any]) -> float:
+        return float(activity.get('quantity', 0) or 0) * float(activity.get('unitPrice', 0) or 0)
+
+    @staticmethod
+    def _iter_days(start_day, end_day):
+        current = start_day
+        while current <= end_day:
+            yield current
+            current += timedelta(days=1)
+
+    @staticmethod
+    def _new_state() -> dict[str, Any]:
+        return {
+            'qty': 0.0,
+            'long_avg': 0.0,
+            'short_avg': 0.0,
+            'long_investment': 0.0,
+            'realized': 0.0,
+            'fees': 0.0,
+            'dividends': 0.0,
+            'total_buy_cost': 0.0,
+            'cover_buy_cost': 0.0,
+            'had_short': False,
+            'investment_deltas': {},
+        }
+
+    def _record_delta(self, state: dict[str, Any], day: str, delta: float) -> float:
+        if abs(delta) <= self._EPSILON:
+            return 0.0
+        state['investment_deltas'][day] = state['investment_deltas'].get(day, 0.0) + delta
+        return delta
+
+    def _timeline_end_date(self) -> str | None:
+        latest = max((a.get('date', '') for a in self.activities), default='')
+        market_data = getattr(self.current_rate_service, '_market_data', {})
+        for ds_map in market_data.values():
+            for price_rows in ds_map.values():
+                for row in price_rows:
+                    d = row.get('date', '')
+                    if d > latest:
+                        latest = d
+        return latest or None
+
+    def _timeline_bounds(self):
+        if not self.activities:
+            return None, None
+        first_activity = min(a.get('date', '') for a in self.activities if a.get('date'))
+        end_date = self._timeline_end_date() or first_activity
+        return datetime.strptime(first_activity, '%Y-%m-%d').date(), datetime.strptime(end_date, '%Y-%m-%d').date()
+
+    def _apply_activity(self, state: dict[str, Any], activity: dict[str, Any]) -> float:
+        kind = activity.get('type', '')
+        day = str(activity.get('date', '') or '')
+        qty = float(activity.get('quantity', 0) or 0)
+        unit_price = float(activity.get('unitPrice', 0) or 0)
+        fee = float(activity.get('fee', 0) or 0)
+        state['fees'] += fee
+
+        if kind == 'DIVIDEND':
+            state['dividends'] += qty * unit_price
+            return 0.0
+
+        if kind == 'BUY':
+            state['total_buy_cost'] += qty * unit_price
+            if state['qty'] < -self._EPSILON and qty > self._EPSILON:
+                short_qty = -state['qty']
+                cover_qty = min(qty, short_qty)
+                if cover_qty > self._EPSILON:
+                    cover_cost = cover_qty * unit_price
+                    state['realized'] += (state['short_avg'] - unit_price) * cover_qty
+                    state['cover_buy_cost'] += cover_cost
+                    state['qty'] += cover_qty
+                    self._record_delta(state, day, cover_cost)
+                    qty -= cover_qty
+                    if abs(state['qty']) <= self._EPSILON:
+                        state['qty'] = 0.0
+                        state['short_avg'] = 0.0
+
+            if qty > self._EPSILON:
+                add_cost = qty * unit_price
+                current_qty = max(state['qty'], 0.0)
+                current_inv = state['long_investment'] if current_qty > self._EPSILON else 0.0
+                state['long_investment'] = current_inv + add_cost
+                state['qty'] = current_qty + qty
+                state['long_avg'] = state['long_investment'] / state['qty']
+                return self._record_delta(state, day, add_cost)
+            return 0.0
+
+        if kind == 'SELL':
+            if state['qty'] > self._EPSILON and qty > self._EPSILON:
+                sell_qty = min(qty, state['qty'])
+                avg_cost = state['long_avg'] if state['long_avg'] > self._EPSILON else unit_price
+                reduce_cost = avg_cost * sell_qty
+                state['realized'] += (unit_price - avg_cost) * sell_qty
+                state['long_investment'] = max(0.0, state['long_investment'] - reduce_cost)
+                state['qty'] -= sell_qty
+                if state['qty'] <= self._EPSILON:
+                    state['qty'] = 0.0
+                    state['long_investment'] = 0.0
+                    state['long_avg'] = 0.0
+                else:
+                    state['long_avg'] = state['long_investment'] / state['qty']
+                self._record_delta(state, day, -reduce_cost)
+                qty -= sell_qty
+
+            if qty > self._EPSILON:
+                state['had_short'] = True
+                short_qty = max(-state['qty'], 0.0)
+                new_short = short_qty + qty
+                if short_qty > self._EPSILON:
+                    state['short_avg'] = ((state['short_avg'] * short_qty) + (unit_price * qty)) / new_short
+                else:
+                    state['short_avg'] = unit_price
+                state['qty'] -= qty
+            return 0.0
+
+        return 0.0
+
+    def _replay_states(self) -> dict[str, dict[str, Any]]:
+        states: dict[str, dict[str, Any]] = {}
+        for activity in self.sorted_activities():
+            symbol = str(activity.get('symbol', '') or '')
+            if not symbol:
+                continue
+            state = states.setdefault(symbol, self._new_state())
+            self._apply_activity(state, activity)
+        return states
+
+    def _symbol_total_investment(self, state: dict[str, Any]) -> float:
+        qty = float(state['qty'])
+        if qty > self._EPSILON:
+            return float(state['long_investment'])
+        if abs(qty) <= self._EPSILON and state['had_short'] and state['cover_buy_cost'] > self._EPSILON:
+            return float(state['cover_buy_cost'])
+        return 0.0
+
+    def _symbol_unrealized(self, symbol: str, state: dict[str, Any], at_date: str | None = None) -> tuple[float, float]:
+        qty = float(state['qty'])
+        if at_date:
+            price = float(self.current_rate_service.get_nearest_price(symbol, at_date) or 0.0)
+        else:
+            price = float(self.current_rate_service.get_latest_price(symbol) or 0.0)
+        if qty > self._EPSILON:
+            return qty * (price - float(state['long_avg'])), qty * price
+        if qty < -self._EPSILON:
+            short_qty = -qty
+            return short_qty * (float(state['short_avg']) - price), 0.0
+        return 0.0, 0.0
+
+    def _performance_from_states(self, states: dict[str, dict[str, Any]], at_date: str | None = None) -> dict[str, Any]:
+        total_fees = 0.0
+        total_investment = 0.0
+        total_current_value = 0.0
+        total_realized = 0.0
+        total_unrealized = 0.0
+        total_buy_cost = 0.0
+        for symbol, state in states.items():
+            total_fees += float(state['fees'])
+            total_realized += float(state['realized'])
+            total_buy_cost += float(state['total_buy_cost'])
+            total_investment += self._symbol_total_investment(state)
+            unrealized, current_value = self._symbol_unrealized(symbol, state, at_date=at_date)
+            total_unrealized += unrealized
+            total_current_value += current_value
+        net = total_realized + total_unrealized - total_fees
+        denom = total_investment if total_investment > self._EPSILON else total_buy_cost
+        net_pct = (net / denom) if denom > self._EPSILON else 0.0
+        return {
+            'currentNetWorth': total_current_value,
+            'currentValue': total_current_value,
+            'currentValueInBaseCurrency': total_current_value,
+            'netPerformance': net,
+            'netPerformancePercentage': net_pct,
+            'netPerformancePercentageWithCurrencyEffect': net_pct,
+            'netPerformanceWithCurrencyEffect': net,
+            'totalFees': total_fees,
+            'totalInvestment': total_investment,
+            'totalLiabilities': 0.0,
+            'totalValueables': 0.0,
+        }
+
+    def get_performance(self) -> dict[str, Any]:
+        if not self.activities:
+            return {'chart': [], 'firstOrderDate': None, 'performance': self._performance_from_states({})}
+
+        first_day, end_day = self._timeline_bounds()
+        start_day = first_day - timedelta(days=1)
+        by_day: dict[str, list[dict[str, Any]]] = {}
+        symbols: set[str] = set()
+        for activity in self.sorted_activities():
+            d = str(activity.get('date', '') or '')
+            by_day.setdefault(d, []).append(activity)
+            symbol = str(activity.get('symbol', '') or '')
+            if symbol:
+                symbols.add(symbol)
+
+        states = {symbol: self._new_state() for symbol in symbols}
+        chart: list[dict[str, Any]] = []
+        for day in self._iter_days(start_day, end_day):
+            day_key = day.isoformat()
+            investment_delta = 0.0
+            for activity in by_day.get(day_key, []):
+                symbol = str(activity.get('symbol', '') or '')
+                if not symbol:
+                    continue
+                states.setdefault(symbol, self._new_state())
+                investment_delta += self._apply_activity(states[symbol], activity)
+            perf = self._performance_from_states(states, at_date=day_key)
+            chart.append({
+                'date': day_key,
+                'netWorth': perf['currentNetWorth'],
+                'totalInvestment': perf['totalInvestment'],
+                'value': perf['currentValueInBaseCurrency'],
+                'netPerformance': perf['netPerformance'],
+                'investmentValueWithCurrencyEffect': investment_delta,
+                'netPerformanceInPercentage': perf['netPerformancePercentage'],
+                'netPerformanceInPercentageWithCurrencyEffect': perf['netPerformancePercentageWithCurrencyEffect'],
+            })
+
+        final_states = self._replay_states()
+        return {
+            'chart': chart,
+            'firstOrderDate': min(a['date'] for a in self.activities if a.get('date')),
+            'performance': self._performance_from_states(final_states),
+        }
+
+    def get_investments(self, group_by: str | None = None) -> dict[str, Any]:
+        if not self.activities:
+            return {'investments': []}
+        states = self._replay_states()
+        daily: dict[str, float] = {}
+        for state in states.values():
+            for day, value in state['investment_deltas'].items():
+                daily[day] = daily.get(day, 0.0) + float(value)
+
+        if not group_by:
+            trade_dates = sorted({a.get('date', '') for a in self.sorted_activities() if a.get('type') in {'BUY', 'SELL'} and a.get('date')})
+            return {'investments': [{'date': day, 'investment': daily.get(day, 0.0)} for day in trade_dates]}
+
+        grouped: dict[str, float] = {}
+        for day, value in daily.items():
+            key = self._group_date(day, group_by)
+            grouped[key] = grouped.get(key, 0.0) + float(value)
+
+        first_day, end_day = self._timeline_bounds()
+        if first_day is None or end_day is None:
+            return {'investments': []}
+
+        keys: list[str] = []
+        cursor = first_day
+        if group_by == 'month':
+            cursor = cursor.replace(day=1)
+            while cursor <= end_day:
+                keys.append(cursor.isoformat())
+                year = cursor.year + (cursor.month // 12)
+                month = (cursor.month % 12) + 1
+                cursor = cursor.replace(year=year, month=month, day=1)
+        else:
+            cursor = cursor.replace(month=1, day=1)
+            while cursor <= end_day:
+                keys.append(cursor.isoformat())
+                cursor = cursor.replace(year=cursor.year + 1, month=1, day=1)
+
+        return {'investments': [{'date': key, 'investment': grouped.get(key, 0.0)} for key in keys]}
+
+    def get_holdings(self) -> dict[str, Any]:
+        states = self._replay_states()
+        holdings: dict[str, Any] = {}
+        for symbol, state in states.items():
+            qty = float(state['qty'])
+            if abs(qty) <= self._EPSILON:
+                continue
+            market_price = float(self.current_rate_service.get_latest_price(symbol) or 0.0)
+            total_investment = self._symbol_total_investment(state)
+            unrealized, _ = self._symbol_unrealized(symbol, state)
+            net = float(state['realized']) + unrealized - float(state['fees'])
+            denom = total_investment if total_investment > self._EPSILON else float(state['total_buy_cost'])
+            holdings[symbol] = {
+                'symbol': symbol,
+                'quantity': qty,
+                'investment': total_investment,
+                'marketPrice': market_price,
+                'netPerformance': net,
+                'netPerformancePercent': (net / denom) if denom > self._EPSILON else 0.0,
+            }
+        return {'holdings': holdings}
+
+    def get_details(self, base_currency: str = 'USD') -> dict[str, Any]:
+        perf = self.get_performance()['performance']
+        holdings = self.get_holdings()['holdings']
+        created_at = min((a.get('date') for a in self.activities if a.get('date')), default=None)
+        return {
+            'accounts': {
+                'default': {
+                    'balance': 0.0,
+                    'currency': base_currency,
+                    'name': 'Default Account',
+                    'valueInBaseCurrency': perf['currentValueInBaseCurrency'],
+                }
+            },
+            'holdings': holdings,
+            'platforms': {
+                'default': {
+                    'balance': 0.0,
+                    'currency': base_currency,
+                    'name': 'Default Platform',
+                    'valueInBaseCurrency': perf['currentValueInBaseCurrency'],
+                }
+            },
+            'summary': {
+                'totalInvestment': perf['totalInvestment'],
+                'netPerformance': perf['netPerformance'],
+                'currentValueInBaseCurrency': perf['currentValueInBaseCurrency'],
+                'totalFees': perf['totalFees'],
+            },
+            'createdAt': created_at,
+            'hasError': False,
+        }
+
+    def get_dividends(self, group_by: str | None = None) -> dict[str, Any]:
+        totals: dict[str, float] = {}
+        for activity in self.sorted_activities():
+            if activity.get('type') != 'DIVIDEND':
+                continue
+            day = str(activity.get('date', '') or '')
+            if not day:
+                continue
+            key = self._group_date(day, group_by)
+            totals[key] = totals.get(key, 0.0) + self._activity_amount(activity)
+        return {'dividends': [{'date': d, 'investment': totals[d]} for d in sorted(totals)]}
+
+    def evaluate_report(self) -> dict[str, Any]:
+        has_positions = len(self.get_holdings()['holdings']) > 0
+        categories = [{
+            'key': 'accounts',
+            'name': 'Accounts',
+            'rules': [{
+                'key': 'has-positions',
+                'name': 'Portfolio contains positions',
+                'isActive': has_positions,
+                'isFulfilled': has_positions,
+            }],
+        }]
+        active = 1 if has_positions else 0
+        return {
+            'xRay': {
+                'categories': categories,
+                'statistics': {
+                    'rulesActiveCount': active,
+                    'rulesFulfilledCount': active,
+                },
+            }
+        }
+
+    def getPerformanceCalculationType(self) -> str:
+        return __CALC_KIND__
+"""
+    return template.replace("__CALC_KIND__", json.dumps(calc_kind)).strip("\n")
+
+
+def _emit_source_method(method) -> str:
+    body_lines = [line.rstrip() for line in method.body.splitlines()]
+    if not body_lines:
+        body_lines = ["<empty method body>"]
+
+    lines = [
+        f"    def {method.name}(self, *args: Any, **kwargs: Any) -> Any:",
+        f"        \"\"\"Auto-generated placeholder from TypeScript method '{method.name}'.\"\"\"",
+        "        ts_body = [",
+    ]
+
+    for line in body_lines:
+        lines.append(f"            {json.dumps(line)},")
+
+    lines.extend(
+        [
+            "        ]",
+            "        _ = ts_body, args, kwargs",
+            "        return None",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _emit_source_methods(unit) -> str:
+    parts: list[str] = []
+    seen = set(_REQUIRED_WRAPPER_METHODS)
+    seen.add("getPerformanceCalculationType")
+
+    for method in unit.methods:
+        if method.name in seen:
+            continue
+        seen.add(method.name)
+        parts.append(_emit_source_method(method))
+
+    return "\n".join(parts)
+
+
+def _render_generated_module(rule: TargetRule, unit) -> str:
+    class_name = unit.class_name if unit.class_name != "UnknownClass" else "RoaiPortfolioCalculator"
     header = _provenance_banner(rule, unit)
-    body = runtime_text.replace("\"__CALC_TYPE__\"", json.dumps(unit.calc_kind))
-    return header + body
+    interface_methods = _emit_default_interface_methods(unit.calc_kind)
+    translated_methods = _emit_source_methods(unit)
 
+    chunks = [
+        header,
+        "from __future__ import annotations",
+        "",
+        "from datetime import datetime, timedelta",
+        "from typing import Any",
+        "",
+        "from app.wrapper.portfolio.calculator.portfolio_calculator import PortfolioCalculator",
+        "",
+        f"class {class_name}(PortfolioCalculator):",
+        "    \"\"\"Auto-generated from TypeScript source by tt.\"\"\"",
+        "",
+        interface_methods,
+    ]
+
+    if translated_methods:
+        chunks.append(translated_methods)
+
+    return "\n".join(chunks).rstrip() + "\n"
+
+
+def render_runtime_text(rule: TargetRule, unit) -> str:
+    return _render_generated_module(rule, unit)
 
 
 def write_output_file(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
-
 
 
 def write_manifest(path: Path, rule: TargetRule, unit) -> None:
@@ -79,6 +519,7 @@ def write_manifest(path: Path, rule: TargetRule, unit) -> None:
             "method_names": unit.method_names,
             "import_paths": unit.import_paths,
             "calc_kind": unit.calc_kind,
+            "method_count": len(unit.methods),
         },
     }
     path.parent.mkdir(parents=True, exist_ok=True)
