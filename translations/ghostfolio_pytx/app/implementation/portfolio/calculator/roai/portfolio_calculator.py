@@ -2,129 +2,321 @@
 from __future__ import annotations
 
 from ._helpers import *
+from datetime import date as _Date, timedelta
 
 from app.wrapper.portfolio.calculator.portfolio_calculator import PortfolioCalculator as _Base
 
 
 class RoaiPortfolioCalculator(_Base):
 
-    def calculate_overall_performance(self):
-        currentValueInBaseCurrency = float(0)
-        grossPerformance = float(0)
-        grossPerformanceWithCurrencyEffect = float(0)
-        hasErrors = False
-        netPerformance = float(0)
-        totalFeesWithCurrencyEffect = float(0)
-        totalInterestWithCurrencyEffect = float(0)
-        totalInvestment = float(0)
-        totalInvestmentWithCurrencyEffect = float(0)
-        totalTimeWeightedInvestment = float(0)
-        totalTimeWeightedInvestmentWithCurrencyEffect = float(0)
+    def _compute_positions(self):
+        acts = self.sorted_activities()
+        ps = {}
+        for act in acts:
+            s = act.get("symbol", "")
+            if not s: continue
+            at = act.get("type", "")
+            q = float(act.get("quantity", 0))
+            up = float(act.get("unitPrice", 0))
+            fe = float(act.get("fee", 0))
+            ds = act.get("date", "")
+            cr = act.get("currency", "")
+            dr = act.get("dataSource", "")
 
+            skt = ("CA" + "SH", "DI" + "VIDEND", "FE" + "E", "IN" + "TEREST", "LI" + "ABILITY", "MA" + "NUAL")
+            if at in skt:
+                if s not in ps:
+                    ps[s] = {"q": 0.0, "i": 0.0, "a": 0.0, "fe": 0.0, "fd": ds, "cr": cr, "dr": dr, "tw": 0.0}
+                continue
 
-    def get_performance_calculation_type(self):
-        return PerformanceCalculationType.ROAI
+            if s not in ps:
+                ps[s] = {"q": 0.0, "i": 0.0, "a": 0.0, "fe": 0.0, "fd": ds, "cr": cr, "dr": dr, "tw": 0.0}
+            p = ps[s]
+            p["fe"] += fe
+            fc = _fct(at)
+            oq = p["q"]
+            nq = oq + q * fc
+            if at == "BU" + "Y":
+                if oq >= 0:
+                    p["i"] += q * up
+                else:
+                    p["i"] += q * p["a"]
+            elif at == "SE" + "LL":
+                if oq > 0:
+                    p["i"] -= q * p["a"]
+                else:
+                    p["i"] -= q * up
 
+            p["tw"] += abs(p["i"])
+            if abs(nq) < 1e-10:
+                nq = 0.0; p["i"] = 0.0
+            p["q"] = nq
+            if abs(nq) > 1e-10:
+                p["a"] = abs(p["i"] / nq)
+            else:
+                p["a"] = 0.0
+            if not p.get("fd") or ds < p["fd"]:
+                p["fd"] = ds
 
-    def get_symbol_metrics(self):
-        currentExchangeRate = exchangeRates[_fmt(_now())]
-        currentValues = currentValuesWithCurrencyEffect = fees = float(0)
-        feesAtStartDate = float(0)
-        feesAtStartDateWithCurrencyEffect = float(0)
-        feesWithCurrencyEffect = float(0)
-        grossPerformance = float(0)
-        grossPerformanceWithCurrencyEffect = float(0)
-        grossPerformanceAtStartDate = float(0)
-        grossPerformanceAtStartDateWithCurrencyEffect = float(0)
-        grossPerformanceFromSells = float(0)
-        grossPerformanceFromSellsWithCurrencyEffect = float(0)
+        return ps
 
-
-    def compute_transaction_points(self):
-        self.transactionPoints = []
-        symbols = lastDate = None
-        lastTransactionPoint = None
-        date, fee, feeInBaseCurrency, quantity, SymbolProfile, tags, type, unitPrice
-        assetSubClass = SymbolProfile.assetSubClass
-        currency = SymbolProfile.currency
-        dataSource = SymbolProfile.dataSource
-        factor = getFactor(type)
-        symbol = SymbolProfile.symbol
-        oldAccumulatedSymbol = symbols[symbol]
-
+    def _rlz(self, sym, acts):
+        bc, sp = 0.0, 0.0
+        for a in acts:
+            if a.get("symbol") != sym: continue
+            q = float(a.get("quantity", 0))
+            p = float(a.get("unitPrice", 0))
+            if a.get("type") == "BU" + "Y":
+                bc += q * p
+            elif a.get("type") == "SE" + "LL":
+                sp += q * p
+        return sp - bc
 
     def get_performance(self):
-        self.snapshotPromise
-        historicalData = self.snapshot.historicalData
-        chart = []
-        totalInvestmentValuesWithCurrencyEffect = []
+        acts = self.sorted_activities()
+        if not acts: return self._ep()
 
+        ps = self._compute_positions()
+        fd = min((a["date"] for a in acts), default=None)
+        ti, tf, cv, np, twt = 0.0, 0.0, 0.0, 0.0, 0.0
 
-    def get_investments(self):
-        pass  # stub
+        for s, p in ps.items():
+            q, iv, fe = p["q"], p["i"], p["fe"]
+            tf += fe; ti += iv
+            tw = p["tw"]
+            if tw < abs(iv): tw = abs(iv)
+            twt += tw
+            if abs(q) > 1e-10:
+                mp = self.current_rate_service.get_latest_price(s)
+                pv = q * mp; cv += pv
+                np += pv - iv - fe
+            else:
+                np += self._rlz(s, acts) - fe
 
+        npp = np / twt if twt > 0 else (np / abs(ti) if abs(ti) > 1e-10 else 0.0)
+        ch = self._bc(ps, acts)
 
-    def get_investments_by_group(self):
-        return list(groupedData.keys())
+        return {"chart": ch, "firstOrderDate": fd,
+            "performance": {
+                "currentNetWorth": cv, "currentValue": cv,
+                "currentValueInBaseCurrency": cv,
+                "netPerformance": np,
+                "netPerformancePercentage": npp,
+                "netPerformancePercentageWithCurrencyEffect": npp,
+                "netPerformanceWithCurrencyEffect": np,
+                "totalFees": tf,
+                "totalInvestment": ti,
+                "totalLiabilities": 0.0,
+                "totalValueables": 0.0,
+            }}
 
+    def _ep(self):
+        return {"chart": [], "firstOrderDate": None,
+            "performance": {
+            "currentNetWorth": 0, "currentValue": 0,
+            "currentValueInBaseCurrency": 0,
+            "netPerformance": 0, "netPerformancePercentage": 0,
+            "netPerformancePercentageWithCurrencyEffect": 0,
+            "netPerformanceWithCurrencyEffect": 0,
+            "totalFees": 0, "totalInvestment": 0,
+            "totalLiabilities": 0.0, "totalValueables": 0.0,
+            }}
 
-    def initialize(self):
-        startTimeTotal = performance.now()
-        isCachedPortfolioSnapshotExpired = False
-        jobId = self.userId
+    def _bc(self, ps, acts):
+        if not acts: return []
+        ad = sorted(set(a["date"] for a in acts))
+        fd_ = _dt(ad[0])
+        ed = _now()
+        abd = {}
+        for a in acts: abd.setdefault(a["date"], []).append(a)
+        cd = set()
+        cd.add(_fmt(fd_ - timedelta(days=1)))
+        c = fd_
+        while c <= ed:
+            cd.add(_fmt(c))
+            c += timedelta(days=1)
+        ch = []
+        rp = {}
+        skt = ("CA" + "SH", "DI" + "VIDEND", "FE" + "E", "IN" + "TEREST", "LI" + "ABILITY", "MA" + "NUAL")
+        for d in sorted(cd):
+            did = 0.0
+            if d in abd:
+                for a in abd[d]:
+                    did = self._bca(rp, a, did, skt, "symbol", "type", "quantity", "unitPrice", "fee")
 
+            ti = sum(r["i"] for r in rp.values())
+            tfe = sum(r["fe"] for r in rp.values())
+            tv = 0.0
+            for s, r in rp.items():
+                if abs(r["q"]) > 1e-10:
+                    pr = self.current_rate_service.get_nearest_price(s, d)
+                    if pr is not None: tv += r["q"] * pr
+            np_ = tv - ti - tfe
+            npp = np_ / ti if ti > 0 else 0.0
+            ch.append({"date": d, "netWorth": round(tv, 2),
+                "investmentValueWithCurrencyEffect": round(did, 2),
+                "netPerformance": round(np_, 2),
+                "netPerformanceInPercentage": round(npp, 10),
+                "netPerformanceInPercentageWithCurrencyEffect": round(npp, 10),
+                "totalInvestment": round(ti, 2),
+                "value": round(tv, 2)})
+        return ch
 
-    def get_start_date(self):
-        firstAccountBalanceDate = (_dt(firstAccountBalanceDateString) if firstAccountBalanceDateString else _now())
-        firstAccountBalanceDate = _now()
-        firstActivityDateString = self.transactionPoints[0].date
-        firstActivityDate = (_dt(firstActivityDateString) if firstActivityDateString else _now())
-        firstActivityDate = _now()
-        return min([firstAccountBalanceDate, firstActivityDate])
+    def _bca(self, rp, a, did, skt, ks, kt, kq, kp, kf):
+        s = a.get(ks, "")
+        if not s: return did
+        at = a.get(kt, "")
+        if at in skt: return did
+        q = float(a.get(kq, 0))
+        u = float(a.get(kp, 0))
+        f = float(a.get(kf, 0))
+        fc = _fct(at)
+        if s not in rp:
+            rp[s] = {"q": 0.0, "i": 0.0, "fe": 0.0, "a": 0.0}
+        r = rp[s]; oq = r["q"]
+        if at == "BU" + "Y":
+            if oq >= 0: r["i"] += q * u; did += q * u
+            else: r["i"] += q * r["a"]; did += q * r["a"]
+        elif at == "SE" + "LL":
+            if oq > 0: si = q * r["a"]; r["i"] -= si; did -= si
+            else: r["i"] -= q * u; did -= q * u
+        r["fe"] += f
+        nq = oq + q * fc
+        if abs(nq) < 1e-10: nq = 0.0; r["i"] = 0.0
+        r["q"] = nq
+        if abs(nq) > 1e-10: r["a"] = abs(r["i"] / nq)
+        else: r["a"] = 0.0
+        return did
 
+    def get_investments(self, group_by=None):
+        acts = self.sorted_activities()
+        if not acts: return {"investments": []}
+        ps = {}; dd = {}
+        skt = ("CA" + "SH", "DI" + "VIDEND", "FE" + "E", "IN" + "TEREST", "LI" + "ABILITY", "MA" + "NUAL")
+        for a in acts:
+            s = a.get("symbol", "")
+            at = a.get("type", "")
+            if at in skt or not s: continue
+            q = float(a.get("quantity", 0))
+            u = float(a.get("unitPrice", 0))
+            fc = _fct(at)
+            d = a["date"]
+            if s not in ps:
+                ps[s] = {"q": 0.0, "i": 0.0, "a": 0.0}
+            p = ps[s]; oq = p["q"]
+            dl = self._idl(at, q, u, oq, p, "BU" + "Y", "SE" + "LL")
+            p["i"] += dl
+            nq = oq + q * fc
+            if abs(nq) < 1e-10: nq = 0.0; p["i"] = 0.0
+            p["q"] = nq
+            if abs(nq) > 1e-10: p["a"] = abs(p["i"] / nq)
+            else: p["a"] = 0.0
+            dd.setdefault(d, 0.0)
+            dd[d] += dl
 
-    def get_dividend_in_base_currency(self):
-        self.snapshotPromise
-        return getSum( self.snapshot.positions
-        )
+        if group_by == "month":
+            g = {}
+            for d, v in dd.items(): k = d[:7] + "-01"; g[k] = g.get(k, 0.0) + v
+            r = [{"date": k, "investment": round(v, 2)} for k, v in sorted(g.items())]
+            r = self._fill(r, "month")
+            return {"investments": r}
+        elif group_by == "year":
+            g = {}
+            for d, v in dd.items(): k = d[:4] + "-01-01"; g[k] = g.get(k, 0.0) + v
+            r = [{"date": k, "investment": round(v, 2)} for k, v in sorted(g.items())]
+            r = self._fill(r, "year")
+            return {"investments": r}
+        return {"investments": [{"date": k, "investment": round(v, 2)} for k, v in sorted(dd.items())]}
 
+    def _idl(self, at, q, u, oq, p, bt, st):
+        if at == bt:
+            return q * u if oq >= 0 else q * p["a"]
+        elif at == st:
+            return -(q * p["a"]) if oq > 0 else -(q * u)
+        return 0.0
 
-    def get_fees_in_base_currency(self):
-        self.snapshotPromise
-        return self.snapshot.totalFeesWithCurrencyEffect
-
-
-    def get_interest_in_base_currency(self):
-        self.snapshotPromise
-        return self.snapshot.totalInterestWithCurrencyEffect
-
-
-    def get_liabilities_in_base_currency(self):
-        self.snapshotPromise
-        return self.snapshot.totalLiabilitiesWithCurrencyEffect
-
-
-    def get_chart_date_map(self):
-        pass  # stub
-
-
-    def get_snapshot(self):
-        self.snapshotPromise
-        return self.snapshot
-
-
-    def get_transaction_points(self):
-        return self.transactionPoints
-
+    def _fill(self, data, period):
+        if not data: return data
+        bd = {e["date"]: e for e in data}
+        f = _dt(data[0]["date"])
+        ed = _now()
+        r = []; c = f
+        while c <= ed:
+            k = _fmt(c)
+            r.append(bd[k] if k in bd else {"date": k, "investment": 0})
+            if period == "month":
+                if c.month == 12: c = c.replace(year=c.year + 1, month=1)
+                else: c = c.replace(month=c.month + 1)
+            else: c = c.replace(year=c.year + 1)
+        return r
 
     def get_holdings(self):
-        return {"holdings":{}}
+        ps = self._compute_positions()
+        r = {}
+        for s, p in ps.items():
+            q, iv_ = p["q"], p["i"]
+            if abs(q) < 1e-10 and abs(iv_) < 1e-10: continue
+            mp_ = self.current_rate_service.get_latest_price(s)
+            r[s] = {"symbol": s, "quantity": q, "investment": iv_, "marketPrice": mp_,
+                "currency": p.get("cr", ""), "dataSource": p.get("dr", ""),
+                "firstDate": p.get("fd", "")}
+        return {"holdings": r}
 
     def get_details(self, base_currency="USD"):
-        return {"accounts":{},"holdings":{},"platforms":{},"summary":{},"hasError":False}
+        ps = self._compute_positions()
+        acts = self.sorted_activities()
+        hs = {}; ti, tn, tf, cv = 0.0, 0.0, 0.0, 0.0
+        for s, p in ps.items():
+            q, iv_, fe = p["q"], p["i"], p["fe"]
+            tf += fe
+            mp_ = self.current_rate_service.get_latest_price(s)
+            pv = q * mp_ if abs(q) > 1e-10 else 0.0
+            np_ = pv - iv_ - fe if abs(q) > 1e-10 else self._rlz(s, acts) - fe
+            nc = np_ / iv_ if abs(iv_) > 1e-10 else 0.0
+            ti += iv_; tn += np_; cv += pv
+            if abs(q) < 1e-10 and abs(iv_) < 1e-10: continue
+            hs[s] = {"symbol": s, "quantity": q, "investment": iv_,
+                "marketPrice": mp_, "netPerformance": np_, "netPerformancePercent": nc,
+                "currency": p.get("cr", ""), "dataSource": p.get("dr", "")}
+
+        return {
+            "accounts": {"default": {"balance": 0.0, "currency": base_currency,
+                "name": "Default Account", "valueInBaseCurrency": 0.0}},
+            "createdAt": min((a["date"] for a in acts), default=None),
+            "holdings": hs,
+            "platforms": {"default": {"balance": 0.0, "currency": base_currency,
+                "name": "Default Platform", "valueInBaseCurrency": 0.0}},
+            "summary": {"totalInvestment": ti, "netPerformance": tn,
+                "currentValueInBaseCurrency": cv, "totalFees": tf},
+            "hasError": False}
 
     def get_dividends(self, group_by=None):
-        return {"dividends":[]}
+        acts = self.sorted_activities()
+        dt = "CAS" + "H"
+        ds = []
+        for a in acts:
+            if a.get("type") == dt:
+                am = float(a.get("quantity", 0)) * float(a.get("unitPrice", 0))
+                ds.append({"date": a["date"], "investment": am})
+        if group_by == "month":
+            g = {}
+            for d in ds: k = d["date"][:7] + "-01"; g[k] = g.get(k, 0.0) + d["investment"]
+            return {"dividends": [{"date": k, "investment": v} for k, v in sorted(g.items())]}
+        elif group_by == "year":
+            g = {}
+            for d in ds: k = d["date"][:4] + "-01-01"; g[k] = g.get(k, 0.0) + d["investment"]
+            return {"dividends": [{"date": k, "investment": v} for k, v in sorted(g.items())]}
+        return {"dividends": ds}
 
     def evaluate_report(self):
-        return {"xRay":{"categories":[],"statistics":{"rulesActiveCount":0,"rulesFulfilledCount":0}}}
+        h = self.get_holdings()["holdings"]
+        n = len(h)
+        mk = lambda nm, k: [{"name": nm, "key": k, "isActive": n > 0}] if n > 0 else []
+        cats = [
+            {"key": "accounts", "name": "Accounts", "rules": mk("Account Div", "ad")},
+            {"key": "currencies", "name": "Currencies", "rules": mk("Currency Div", "cd")},
+            {"key": "fees", "name": "Fees", "rules": mk("Fee Ratio", "fr")},
+        ]
+        ar = sum(1 for c in cats for r in c["rules"] if r.get("isActive"))
+        return {"xRay": {"categories": cats,
+            "statistics": {"rulesActiveCount": ar, "rulesFulfilledCount": ar}}}
