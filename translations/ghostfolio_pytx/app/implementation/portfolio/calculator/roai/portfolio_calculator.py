@@ -56,6 +56,11 @@ def _new_symbol_state() -> dict:
 class RoaiPortfolioCalculator(PortfolioCalculator):
     """ROAI calculator implementation used by the wrapper service."""
 
+    def _timeline_bounds(self) -> tuple[date, date]:
+        first_activity = min(a["date"] for a in self.activities)
+        end_date = self._timeline_end_date() or first_activity
+        return _parse_date(first_activity), _parse_date(end_date)
+
     def _timeline_end_date(self) -> str | None:
         latest = max((a.get("date", "") for a in self.activities), default="")
         market_data = getattr(self.current_rate_service, "_market_data", {})
@@ -67,65 +72,58 @@ class RoaiPortfolioCalculator(PortfolioCalculator):
                         latest = d
         return latest or None
 
-    def _apply_activity_to_state(self, state: dict, activity: dict) -> None:
-        act_type = activity.get("type", "")
-        day = activity.get("date", "")
-        qty = float(activity.get("quantity", 0) or 0)
-        unit_price = float(activity.get("unitPrice", 0) or 0)
-        fee = float(activity.get("fee", 0) or 0)
+    def _record_investment_delta(self, state: dict, day: str, delta: float) -> float:
+        if abs(delta) <= EPSILON:
+            return 0.0
+        state["investment_deltas"][day] += delta
+        return delta
 
-        state["fees"] += fee
+    def _apply_buy(self, state: dict, day: str, qty: float, unit_price: float) -> float:
+        delta = 0.0
+        state["total_buy_cost"] += qty * unit_price
 
-        if act_type == "DIVIDEND":
-            state["dividends"] += qty * unit_price
-            return
+        if state["qty"] < -EPSILON:
+            state["had_short"] = True
+            short_qty = -state["qty"]
+            cover_qty = min(qty, short_qty)
 
-        if act_type == "LIABILITY":
-            return
+            if cover_qty > EPSILON:
+                cover_cost = cover_qty * unit_price
+                state["realized"] += (state["short_avg"] - unit_price) * cover_qty
+                state["cover_buy_cost"] += cover_cost
+                delta += self._record_investment_delta(state, day, cover_cost)
+                state["qty"] += cover_qty
+                qty -= cover_qty
 
-        if act_type not in {"BUY", "SELL"}:
-            return
+            if abs(state["qty"]) <= EPSILON:
+                state["qty"] = 0.0
+                state["short_avg"] = 0.0
 
-        if act_type == "BUY":
-            state["total_buy_cost"] += qty * unit_price
+        if qty <= EPSILON:
+            return delta
 
-            if state["qty"] < -EPSILON:
-                state["had_short"] = True
-                short_qty = -state["qty"]
-                cover_qty = min(qty, short_qty)
+        add_cost = qty * unit_price
+        current_long_qty = max(state["qty"], 0.0)
+        current_long_inv = state["long_investment"] if current_long_qty > EPSILON else 0.0
 
-                if cover_qty > EPSILON:
-                    state["realized"] += (state["short_avg"] - unit_price) * cover_qty
-                    state["cover_buy_cost"] += cover_qty * unit_price
-                    state["investment_deltas"][day] += cover_qty * unit_price
-                    state["qty"] += cover_qty
-                    qty -= cover_qty
+        state["long_investment"] = current_long_inv + add_cost
+        state["qty"] = current_long_qty + qty
+        state["long_avg"] = state["long_investment"] / state["qty"]
+        delta += self._record_investment_delta(state, day, add_cost)
+        return delta
 
-                if abs(state["qty"]) <= EPSILON:
-                    state["qty"] = 0.0
-                    state["short_avg"] = 0.0
+    def _apply_sell(self, state: dict, day: str, qty: float, unit_price: float) -> float:
+        delta = 0.0
 
-            if qty > EPSILON:
-                add_cost = qty * unit_price
-                current_long_qty = max(state["qty"], 0.0)
-                current_long_inv = state["long_investment"] if current_long_qty > EPSILON else 0.0
-
-                state["long_investment"] = current_long_inv + add_cost
-                state["qty"] = current_long_qty + qty
-                state["long_avg"] = state["long_investment"] / state["qty"]
-                state["investment_deltas"][day] += add_cost
-            return
-
-        # SELL
         if state["qty"] > EPSILON:
             sell_qty = min(qty, state["qty"])
             avg_cost = state["long_avg"] if state["long_avg"] > EPSILON else unit_price
 
             if sell_qty > EPSILON:
-                state["realized"] += (unit_price - avg_cost) * sell_qty
                 reduce_cost = avg_cost * sell_qty
+                state["realized"] += (unit_price - avg_cost) * sell_qty
                 state["long_investment"] = max(0.0, state["long_investment"] - reduce_cost)
-                state["investment_deltas"][day] -= reduce_cost
+                delta += self._record_investment_delta(state, day, -reduce_cost)
                 state["qty"] -= sell_qty
                 qty -= sell_qty
 
@@ -136,20 +134,42 @@ class RoaiPortfolioCalculator(PortfolioCalculator):
             else:
                 state["long_avg"] = state["long_investment"] / state["qty"]
 
-        if qty > EPSILON:
-            # Open or increase short position. This does not add investment.
-            state["had_short"] = True
-            short_qty = max(-state["qty"], 0.0)
-            new_short_qty = short_qty + qty
+        if qty <= EPSILON:
+            return delta
 
-            if short_qty > EPSILON:
-                state["short_avg"] = (
-                    (state["short_avg"] * short_qty) + (unit_price * qty)
-                ) / new_short_qty
-            else:
-                state["short_avg"] = unit_price
+        # Open or increase short position. This does not add investment.
+        state["had_short"] = True
+        short_qty = max(-state["qty"], 0.0)
+        new_short_qty = short_qty + qty
 
-            state["qty"] -= qty
+        if short_qty > EPSILON:
+            state["short_avg"] = (
+                (state["short_avg"] * short_qty) + (unit_price * qty)
+            ) / new_short_qty
+        else:
+            state["short_avg"] = unit_price
+
+        state["qty"] -= qty
+        return delta
+
+    def _apply_activity_to_state(self, state: dict, activity: dict) -> float:
+        act_type = activity.get("type", "")
+        day = activity.get("date", "")
+        qty = float(activity.get("quantity", 0) or 0)
+        unit_price = float(activity.get("unitPrice", 0) or 0)
+        fee = float(activity.get("fee", 0) or 0)
+
+        state["fees"] += fee
+
+        if act_type == "DIVIDEND":
+            state["dividends"] += qty * unit_price
+            return 0.0
+
+        if act_type == "BUY":
+            return self._apply_buy(state, day, qty, unit_price)
+        if act_type == "SELL":
+            return self._apply_sell(state, day, qty, unit_price)
+        return 0.0
 
     def _replay_states(self) -> dict[str, dict]:
         states: dict[str, dict] = {}
@@ -160,6 +180,32 @@ class RoaiPortfolioCalculator(PortfolioCalculator):
             states.setdefault(symbol, _new_symbol_state())
             self._apply_activity_to_state(states[symbol], activity)
         return states
+
+    def _aggregate_daily_investments(self, states: dict[str, dict]) -> dict[str, float]:
+        daily = defaultdict(float)
+        for state in states.values():
+            for day, value in state["investment_deltas"].items():
+                daily[day] += value
+        return daily
+
+    def _group_interval_keys(self, first_day: date, end_day: date, group_by: str) -> list[str]:
+        keys: list[str] = []
+        cursor = first_day
+
+        if group_by == "month":
+            cursor = cursor.replace(day=1)
+            while cursor <= end_day:
+                keys.append(cursor.isoformat())
+                year = cursor.year + (cursor.month // 12)
+                month = (cursor.month % 12) + 1
+                cursor = cursor.replace(year=year, month=month, day=1)
+            return keys
+
+        cursor = cursor.replace(month=1, day=1)
+        while cursor <= end_day:
+            keys.append(cursor.isoformat())
+            cursor = cursor.replace(year=cursor.year + 1, month=1, day=1)
+        return keys
 
     def _symbol_total_investment(self, state: dict) -> float:
         qty = state["qty"]
@@ -225,11 +271,8 @@ class RoaiPortfolioCalculator(PortfolioCalculator):
         if not self.activities:
             return []
 
-        first_activity = min(a["date"] for a in self.activities)
-        end_date = self._timeline_end_date() or first_activity
-
-        start_day = _parse_date(first_activity) - timedelta(days=1)
-        end_day = _parse_date(end_date)
+        first_day, end_day = self._timeline_bounds()
+        start_day = first_day - timedelta(days=1)
 
         by_day: dict[str, list[dict]] = defaultdict(list)
         symbols: set[str] = set()
@@ -254,11 +297,7 @@ class RoaiPortfolioCalculator(PortfolioCalculator):
                     continue
                 if symbol not in states:
                     states[symbol] = _new_symbol_state()
-
-                before = dict(states[symbol]["investment_deltas"])
-                self._apply_activity_to_state(states[symbol], activity)
-                after = states[symbol]["investment_deltas"]
-                investment_delta += after.get(day_key, 0.0) - before.get(day_key, 0.0)
+                investment_delta += self._apply_activity_to_state(states[symbol], activity)
 
             perf = self._performance_from_states(states, at_date=day_key)
             chart.append(
@@ -293,10 +332,7 @@ class RoaiPortfolioCalculator(PortfolioCalculator):
             return {"investments": []}
 
         states = self._replay_states()
-        daily = defaultdict(float)
-        for state in states.values():
-            for day, value in state["investment_deltas"].items():
-                daily[day] += value
+        daily = self._aggregate_daily_investments(states)
 
         if not group_by:
             trade_dates = {
@@ -311,27 +347,13 @@ class RoaiPortfolioCalculator(PortfolioCalculator):
                 ]
             }
 
-        first_day = _parse_date(min(a["date"] for a in self.activities))
-        end_day = _parse_date(self._timeline_end_date() or min(a["date"] for a in self.activities))
+        first_day, end_day = self._timeline_bounds()
 
         grouped = defaultdict(float)
         for day, value in daily.items():
             grouped[_date_key_for_group(_parse_date(day), group_by)] += value
 
-        all_keys: list[str] = []
-        cursor = first_day
-        if group_by == "month":
-            cursor = cursor.replace(day=1)
-            while cursor <= end_day:
-                all_keys.append(cursor.isoformat())
-                year = cursor.year + (cursor.month // 12)
-                month = (cursor.month % 12) + 1
-                cursor = cursor.replace(year=year, month=month, day=1)
-        elif group_by == "year":
-            cursor = cursor.replace(month=1, day=1)
-            while cursor <= end_day:
-                all_keys.append(cursor.isoformat())
-                cursor = cursor.replace(year=cursor.year + 1, month=1, day=1)
+        all_keys = self._group_interval_keys(first_day, end_day, group_by)
 
         return {
             "investments": [
@@ -475,14 +497,9 @@ class RoaiPortfolioCalculator(PortfolioCalculator):
             },
         ]
 
-        active = 0
-        fulfilled = 0
-        for category in categories:
-            for rule in category["rules"]:
-                if rule.get("isActive"):
-                    active += 1
-                    if rule.get("isFulfilled"):
-                        fulfilled += 1
+        all_rules = [rule for category in categories for rule in category["rules"]]
+        active = sum(1 for rule in all_rules if rule.get("isActive"))
+        fulfilled = sum(1 for rule in all_rules if rule.get("isActive") and rule.get("isFulfilled"))
 
         return {
             "xRay": {
