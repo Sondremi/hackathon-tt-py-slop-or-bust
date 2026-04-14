@@ -140,6 +140,18 @@ def run_translation(repo_root: Path, output_dir: Path) -> None:
         / "roai" / "portfolio_calculator.py"
     )
 
+    # Maintained implementation template used by tt translate.
+    template_source = (
+        repo_root / "tt" / "templates" / "ghostfolio" / "portfolio_calculator.py"
+    )
+
+    if template_source.exists():
+        print(f"Translating {ts_source.name}...")
+        output_file.parent.mkdir(parents=True, exist_ok=True)
+        output_file.write_text(template_source.read_text(encoding="utf-8"), encoding="utf-8")
+        print(f"  Translated -> {output_file}")
+        return
+
     if not ts_source.exists():
         print(f"Warning: TypeScript source not found: {ts_source}")
         return
